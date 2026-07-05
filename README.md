@@ -1,0 +1,74 @@
+# dobx-contracts
+
+Smart contracts for **dobx.pro** — the RWA agent launchpad. This repo holds the **fair-launch
+layer** (Nivel 2): a per-agent bonding curve that graduates into an AMM, in the style of
+pump.fun / clawpump, adapted from DOBI's `DobiPump` and `DobiSwap` prototypes.
+
+> Separate, public-facing repo (kept apart from the private `dobx-pro` app) so the contracts
+> can be verified and audited independently. **Pre-audit — do not deploy to mainnet with real
+> funds until audited.**
+
+## What this is
+
+Each agent (a real-world asset operated in DOBI, tokenized as a DobProtocol pool) can also be
+**fair-launched**: its shares are sold on a bonding curve priced in USDC; once the raise hits
+a target, the curve **graduates** — it seeds an AMM with the leftover shares + the USDC raised
+and permanently locks the liquidity. From then on the share price is discovered on the AMM.
+
+```
+launch ──► AgentShareToken (fixed supply, minted into the curve)
+           AgentBondingCurve  ── buy/sell in USDC, price rises with supply sold
+                │  raised ≥ graduationRaise
+                ▼
+           _graduate(): deploy AgentAMM, seed (leftover shares + USDC), LOCK LP
+                ▼
+           AgentAMM (x*y=k, 0.3% fee)  ── continuous USDC market, price discovery
+```
+
+## Contracts
+
+| Contract | Purpose |
+|---|---|
+| `AgentLaunchpad.sol` | Factory + registry. `launch(params)` deploys the token + curve, mints the supply into the curve, records the agent. Owner sets the quote token (USDC) & platform treasury. |
+| `AgentShareToken.sol` | Fixed-supply ERC20 for one agent's shares. No mint after launch, no owner. The same balances DobProtocol reads to distribute the asset's real yield. |
+| `AgentBondingCurve.sol` | Linear bonding curve priced **per whole share in USDC** (`price = basePrice + sold*slope`; cost = integral). Buy fee → platform; sell fee → pool. Graduates to the AMM at `graduationRaise`. |
+| `AgentAMM.sol` | Constant-product AMM (`x*y=k`, 0.3% fee) for shares ↔ USDC. The post-graduation market. |
+| `mocks/MockUSDC.sol` | 6-decimal USDC stand-in for tests / testnets. |
+
+## Design notes
+
+- **Quote = USDC (6 dp).** Unlike the DobiPump/DobiSwap prototypes (which quoted in the 18-dp
+  native coin), pricing is denominated **per whole share** so an 18-dp share token works
+  against a 6-dp quote with exact integer arithmetic and no precision loss.
+- **Liquidity is locked forever.** At graduation the LP is minted to the curve, which has no
+  code path to withdraw it — so it can never be pulled (rug-proof by construction).
+- **Fees.** Buy fee (bps, capped 5%) routes to the platform treasury; sell fee (bps) stays in
+  the pool and lifts the floor for remaining holders. AMM swaps take the standard 0.3%.
+- **Permissionless on-chain, gated off-chain.** Anyone *can* call `launch`, but in practice the
+  dobx backend calls it for the operator whose DOBI asset is being tokenized.
+
+## How it plugs into dobx / DOBI / DobProtocol
+
+- **DOBI** operates the asset and produces the real revenue (x402 pay-per-use).
+- **DobProtocol** distributes that revenue to holders of the share token (pull-based).
+- **These contracts** provide the *market*: fair launch + continuous price for the same share
+  token. Holding a share = a market position **and** a claim on the asset's cash flow.
+
+## Develop
+
+```bash
+npm install
+npm run compile
+npm test            # 10 passing — full lifecycle incl. graduation & AMM swaps
+
+cp .env.example .env  # set PRIVATE_KEY, QUOTE_TOKEN (USDC), PLATFORM_TREASURY
+npm run deploy:baseSepolia
+```
+
+USDC on Base mainnet: `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`.
+
+## Status
+
+Nivel 2 reference implementation, **pre-audit**. Tests green (`npm test`). Before mainnet:
+professional audit, fuzz/invariant tests (Foundry), and a review of the graduation seeding
+price against the curve's final price to minimize the launch/AMM price gap.
