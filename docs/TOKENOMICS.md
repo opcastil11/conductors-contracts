@@ -180,6 +180,13 @@ signature / third-party auditor), a
 **staked operator with slashing** for under-reporting, and asset insurance. Until then, every
 NAV/yield figure is "trust the operator," and that must be disclosed.
 
+**On-chain half built: `OperatorStake.sol`.** The operator posts a USDC bond; a designated
+**attester** can `slash` it to a beneficiary (insurance / treasury) on proven under-reporting.
+Withdrawals are cooldown-delayed and **slashing works during the cooldown**, so the operator
+can't yank the bond to dodge a slash. The *attestation itself* (proving the reported x402 revenue
+matches reality — hardware signature / third-party meter audit) remains off-chain/oracle work;
+this contract is the escrow+slash primitive that gives that attestation teeth.
+
 ---
 
 ## 7. Regulatory framing — handled by DobProtocol's distribution layer
