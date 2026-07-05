@@ -9,3 +9,5 @@ typechain-types/
 .env.local
 *.log
 .DS_Store
+
+deployments/

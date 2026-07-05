@@ -1,4 +1,6 @@
 const { ethers, network } = require("hardhat");
+const fs = require("fs");
+const path = require("path");
 
 /**
  * Deploys the AgentLaunchpad. The quote token (USDC) and platform treasury come from env.
@@ -24,9 +26,19 @@ async function main() {
   const launchpad = await Launchpad.deploy(deployer.address, quote, treasury);
   await launchpad.waitForDeployment();
 
-  console.log(`AgentLaunchpad: ${await launchpad.getAddress()}`);
+  const launchpadAddr = await launchpad.getAddress();
+  console.log(`AgentLaunchpad: ${launchpadAddr}`);
   console.log(`  quoteToken:       ${quote}`);
   console.log(`  platformTreasury: ${treasury}`);
+
+  // Persist addresses so other tooling (the dobx BFF E2E) can pick them up.
+  const outDir = path.join(__dirname, "..", "deployments");
+  fs.mkdirSync(outDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(outDir, `${network.name}.json`),
+    JSON.stringify({ network: network.name, launchpad: launchpadAddr, quoteToken: quote, platformTreasury: treasury }, null, 2)
+  );
+  console.log(`Wrote deployments/${network.name}.json`);
 }
 
 main().catch((e) => {
