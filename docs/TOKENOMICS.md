@@ -19,7 +19,7 @@ Each agent has **two tokens**, sold as **two distinct products**, linked by a on
 ```
    PRODUCT A — Agent Token (growth)              PRODUCT B — Distribution Token (income)
    speculative • bonding curve → AMM             yield-bearing • DobProtocol pool
-   "bet on the agent's success"                  "collect the asset's real cash flow"
+   "bet on the agent's success"                  "collect the agent's operating revenue"
         │                                                 ▲
         │   ── CONVERT: sell A → USDC → buy B ────────────┘
         │      (one-way in practice; USDC-priced, NO oracle; small fee → treasury)
@@ -29,16 +29,16 @@ Each agent has **two tokens**, sold as **two distinct products**, linked by a on
         └────► TREASURY  (retires repurchased A forever; holds the strategic B reserve)
 ```
 
-In TradFi terms this is a **convertible instrument**: **A** behaves like growth equity
-(price tracks belief in the agent), **B** behaves like an income share (a pro-rata claim on
-the asset's real cash flow). A holder can **convert A → B** to move from speculative upside
-to steady yield. The conversion is what tethers A's price to real value — without it, A is
-pure momentum; with it, A has a **fundamental floor** equal to the B (and therefore the real
-yield) you could obtain by converting.
+In TradFi terms: **A** behaves like growth equity (price tracks belief in the agent), **B**
+behaves like an income share — a pro-rata claim on the **agent's operating revenue** (what it
+earns for *managing* the real-world assets, metered via x402), **not on the physical asset
+itself**. A holder can move from A to B (sell A → buy B, §5) to swap speculative upside for
+steady yield. Markets on both sides keep A tethered to real value: A can't trade far below the B
+(and therefore the operating yield) you could buy with the proceeds of selling it.
 
 You can enter either product independently:
 - **Buy A** on the bonding curve / AMM — speculative, liquid, no direct yield.
-- **Buy B** (or convert A→B) — a claim on the asset's distributed revenue.
+- **Buy B** (or convert A→B via §5) — a claim on the agent's distributed operating revenue.
 
 ---
 
@@ -55,9 +55,13 @@ You can enter either product independently:
 
 ### Product B — Distribution Token
 - **What:** the **DobProtocol participation token** of the agent's pool — the token the
-  pull-based distributor pays real revenue to. **Fixed supply** (it represents fractional
-  ownership of the asset's cash flow, like shares).
-- **Value accrual:** receives the agent's real x402 revenue pro-rata, pull-based (claim).
+  pull-based distributor pays real revenue to. **Fixed supply.**
+- **What it represents (important):** a pro-rata claim on the **agent's operating/management
+  revenue** — the fees the agent earns for *operating* the real-world assets (metered via x402),
+  **not fractional ownership of the physical asset itself.** The agent is an operator that gets
+  paid to run charging/vending/solar; B is a share of that service income. This framing is why
+  §7's legal exposure is DobProtocol's distribution layer, not asset securitization.
+- **Value accrual:** receives the agent's real x402 operating revenue pro-rata, pull-based (claim).
 - **Yield per token = R / B_supply** where `R` is net distributable revenue per period.
   Because supply is **fixed**, per-token yield is stable (see §5 for why conversion must not
   inflate B_supply).
