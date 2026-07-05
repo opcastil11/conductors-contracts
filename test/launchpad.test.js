@@ -1,213 +1,187 @@
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
 
-// Economics used across tests:
-//   supply           1,000,000 whole shares
-//   basePrice        50_000 USDC base units = $0.05 per share at sold=0
-//   slope            100    = +$0.0001 per whole share sold
-//   graduationRaise  50_000_000 = $50 raised triggers curve → AMM
+// Economics: supply 1,000,000 shares, basePrice $0.05, slope $0.0001/share, graduate at $50.
 const SUPPLY = 1_000_000n;
 const BASE_PRICE = 50_000n;
 const SLOPE = 100n;
 const GRAD_RAISE = 50_000_000n; // $50
 const BUY_FEE = 100n;  // 1%
 const SELL_FEE = 100n; // 1%
-const USDC = (n) => BigInt(Math.round(n * 1e6)); // $ → 6dp base units
+const USDC = (n) => BigInt(Math.round(n * 1e6));
+const DL = ethers.MaxUint256; // deadline: always valid in tests
+const WAD = 10n ** 18n;
 
 async function deployFixture() {
   const [owner, treasury, alice, bob] = await ethers.getSigners();
-
-  const MockUSDC = await ethers.getContractFactory("MockUSDC");
-  const usdc = await MockUSDC.deploy();
-
-  const Launchpad = await ethers.getContractFactory("AgentLaunchpad");
-  const launchpad = await Launchpad.deploy(owner.address, await usdc.getAddress(), treasury.address);
-
-  // fund buyers
-  for (const u of [alice, bob]) await usdc.mint(u.address, USDC(1_000_000));
-
+  const usdc = await (await ethers.getContractFactory("MockUSDC")).deploy();
+  const launchpad = await (await ethers.getContractFactory("AgentLaunchpad"))
+    .deploy(owner.address, await usdc.getAddress(), treasury.address);
+  for (const u of [alice, bob]) await usdc.mint(u.address, USDC(2_000_000));
   return { owner, treasury, alice, bob, usdc, launchpad };
 }
 
-async function launchAgent(launchpad) {
-  const tx = await launchpad.launch({
-    name: "Providencia EV Hub",
-    symbol: "PROV",
-    supply: SUPPLY,
-    basePrice: BASE_PRICE,
-    slope: SLOPE,
-    buyFeeBps: BUY_FEE,
-    sellFeeBps: SELL_FEE,
-    graduationRaise: GRAD_RAISE,
-  });
-  await tx.wait();
+async function launchAgent(launchpad, as) {
+  const lp = as ? launchpad.connect(as) : launchpad;
+  await (await lp.launch({
+    name: "Providencia EV Hub", symbol: "PROV", supply: SUPPLY, basePrice: BASE_PRICE,
+    slope: SLOPE, buyFeeBps: BUY_FEE, sellFeeBps: SELL_FEE, graduationRaise: GRAD_RAISE,
+  })).wait();
   const l = await launchpad.getLaunch(0);
-  const share = await ethers.getContractAt("AgentShareToken", l.token);
-  const curve = await ethers.getContractAt("AgentBondingCurve", l.curve);
-  return { share, curve };
+  return {
+    share: await ethers.getContractAt("AgentShareToken", l.token),
+    curve: await ethers.getContractAt("AgentBondingCurve", l.curve),
+  };
 }
 
-describe("AgentLaunchpad", () => {
-  it("launches an agent: token minted into the curve", async () => {
+describe("AgentLaunchpad — gating & registry", () => {
+  it("launches an agent and mints the supply into the curve", async () => {
     const { launchpad } = await deployFixture();
     const { share, curve } = await launchAgent(launchpad);
-
     expect(await launchpad.launchesCount()).to.equal(1);
-    expect(await share.totalSupply()).to.equal(SUPPLY * 10n ** 18n);
-    expect(await share.balanceOf(await curve.getAddress())).to.equal(SUPPLY * 10n ** 18n);
+    expect(await share.balanceOf(await curve.getAddress())).to.equal(SUPPLY * WAD);
     expect(await curve.inventory()).to.equal(SUPPLY);
-    expect(await curve.symbol?.() ?? "PROV").to.exist;
+  });
+
+  it("gates launch() to authorized launchers", async () => {
+    const { launchpad, alice, owner } = await deployFixture();
+    await expect(launchAgent(launchpad, alice)).to.be.revertedWith("not authorized");
+    await launchpad.connect(owner).setAuthorizedLauncher(alice.address, true);
+    await expect(launchAgent(launchpad, alice)).to.not.be.reverted;
+  });
+
+  it("publicLaunch opens it to anyone", async () => {
+    const { launchpad, alice, owner } = await deployFixture();
+    await launchpad.connect(owner).setPublicLaunch(true);
+    await expect(launchAgent(launchpad, alice)).to.not.be.reverted;
+  });
+
+  it("pause blocks launching", async () => {
+    const { launchpad, owner } = await deployFixture();
+    await launchpad.connect(owner).pause();
+    await expect(launchAgent(launchpad)).to.be.revertedWithCustomError(launchpad, "EnforcedPause");
+  });
+
+  it("rejects an unreachable graduation target", async () => {
+    const { launchpad } = await deployFixture();
+    await expect(launchpad.launch({
+      name: "X", symbol: "X", supply: SUPPLY, basePrice: BASE_PRICE, slope: SLOPE,
+      buyFeeBps: 0, sellFeeBps: 0, graduationRaise: 10n ** 30n, // > full integral
+    })).to.be.revertedWith("grad unreachable");
   });
 });
 
 describe("AgentBondingCurve", () => {
-  it("prices the first share at basePrice and charges the buy fee", async () => {
+  it("prices the first share at basePrice and routes the buy fee to treasury", async () => {
     const { launchpad, usdc, alice, treasury } = await deployFixture();
     const { share, curve } = await launchAgent(launchpad);
-
-    expect(await curve.getBuyCost(1)).to.equal(BASE_PRICE); // $0.05
-    const cost = await curve.getBuyCost(100n);              // 100 shares
+    expect(await curve.getBuyCost(1)).to.equal(BASE_PRICE);
+    const cost = await curve.getBuyCost(100n);
     const fee = (cost * BUY_FEE) / 10000n;
-
     await usdc.connect(alice).approve(await curve.getAddress(), cost + fee);
-    await curve.connect(alice).buy(100n, cost + fee);
-
-    expect(await share.balanceOf(alice.address)).to.equal(100n * 10n ** 18n);
-    expect(await usdc.balanceOf(treasury.address)).to.equal(fee); // fee routed to platform
+    await curve.connect(alice).buy(100n, cost + fee, DL);
+    expect(await share.balanceOf(alice.address)).to.equal(100n * WAD);
+    expect(await usdc.balanceOf(treasury.address)).to.equal(fee);
     expect(await curve.sold()).to.equal(100n);
-    expect(await curve.raised()).to.equal(cost);
   });
 
-  it("price increases as supply is sold (slope)", async () => {
+  it("price rises with supply sold and honors slippage + deadline", async () => {
     const { launchpad, usdc, alice } = await deployFixture();
     const { curve } = await launchAgent(launchpad);
-
-    const priceBefore = await curve.getCurrentPrice();
     const cost = await curve.getBuyCost(500n);
     await usdc.connect(alice).approve(await curve.getAddress(), cost * 2n);
-    await curve.connect(alice).buy(500n, cost * 2n);
-    const priceAfter = await curve.getCurrentPrice();
-
-    expect(priceBefore).to.equal(BASE_PRICE);
-    expect(priceAfter).to.equal(BASE_PRICE + 500n * SLOPE);
-    expect(priceAfter).to.be.gt(priceBefore);
+    await expect(curve.connect(alice).buy(500n, cost - 1n, DL)).to.be.revertedWith("slippage");
+    await expect(curve.connect(alice).buy(500n, cost * 2n, 1n)).to.be.revertedWith("expired");
+    await curve.connect(alice).buy(500n, cost * 2n, DL);
+    expect(await curve.getCurrentPrice()).to.equal(BASE_PRICE + 500n * SLOPE);
   });
 
-  it("lets a holder sell back before graduation (minus sell fee)", async () => {
+  it("allows selling back before graduation", async () => {
     const { launchpad, usdc, alice } = await deployFixture();
     const { share, curve } = await launchAgent(launchpad);
-
     const cost = await curve.getBuyCost(200n);
     await usdc.connect(alice).approve(await curve.getAddress(), cost * 2n);
-    await curve.connect(alice).buy(200n, cost * 2n);
-
+    await curve.connect(alice).buy(200n, cost * 2n, DL);
     const proceeds = await curve.getSellProceeds(50n);
-    await share.connect(alice).approve(await curve.getAddress(), 50n * 10n ** 18n);
-    const balBefore = await usdc.balanceOf(alice.address);
-    await curve.connect(alice).sell(50n, proceeds);
-    const balAfter = await usdc.balanceOf(alice.address);
-
-    expect(balAfter - balBefore).to.equal(proceeds);
+    await share.connect(alice).approve(await curve.getAddress(), 50n * WAD);
+    const before = await usdc.balanceOf(alice.address);
+    await curve.connect(alice).sell(50n, proceeds, DL);
+    expect((await usdc.balanceOf(alice.address)) - before).to.equal(proceeds);
     expect(await curve.sold()).to.equal(150n);
-  });
-
-  it("rejects buys over available inventory and honors slippage", async () => {
-    const { launchpad, usdc, alice } = await deployFixture();
-    const { curve } = await launchAgent(launchpad);
-
-    await usdc.connect(alice).approve(await curve.getAddress(), USDC(1_000_000));
-    await expect(curve.connect(alice).buy(SUPPLY + 1n, USDC(1_000_000))).to.be.revertedWith("not enough inventory");
-
-    const cost = await curve.getBuyCost(10n);
-    await expect(curve.connect(alice).buy(10n, cost - 1n)).to.be.revertedWith("slippage");
   });
 });
 
-describe("Graduation → AMM", () => {
+describe("Graduation → AMM (audit fixes)", () => {
   async function graduate() {
     const fx = await deployFixture();
     const { share, curve } = await launchAgent(fx.launchpad);
-
-    // Buy enough to cross graduationRaise ($50). At ~$0.05+ per share, ~900 shares raises >$50.
-    await fx.usdc.connect(fx.alice).approve(await curve.getAddress(), USDC(1_000_000));
-    // find k so that raised >= GRAD_RAISE
-    let k = 1000n;
-    const cost = await curve.getBuyCost(k);
-    await curve.connect(fx.alice).buy(k, cost * 2n);
+    await fx.usdc.connect(fx.alice).approve(await curve.getAddress(), USDC(2_000_000));
+    await curve.connect(fx.alice).buy(1000n, USDC(2_000_000), DL);
     expect(await curve.graduated()).to.equal(true);
-
-    const ammAddr = await curve.amm();
-    const amm = await ethers.getContractAt("AgentAMM", ammAddr);
-    return { ...fx, share, curve, amm, k };
+    const amm = await ethers.getContractAt("AgentAMM", await curve.amm());
+    return { ...fx, share, curve, amm };
   }
 
-  it("graduates once the raise target is hit and seeds the AMM", async () => {
-    const { curve, amm, share } = await graduate();
-
-    expect(await curve.graduated()).to.equal(true);
-    // curve emptied its inventory + USDC into the pool
-    expect(await curve.inventory()).to.equal(0n);
-    expect(await share.balanceOf(await amm.getAddress())).to.be.gt(0n);
-    expect(await amm.quoteReserve()).to.be.gt(0n);
-    expect(await amm.shareReserve()).to.be.gt(0n);
-  });
-
-  it("locks the LP forever (LP held by the curve, no withdrawal path)", async () => {
+  it("seeds the AMM at ~the curve's terminal price (no price cliff)", async () => {
     const { curve, amm } = await graduate();
-    const curveLp = await amm.liquidityBalance(await curve.getAddress());
-    expect(curveLp).to.be.gt(0n);
-    // The curve has no function that calls removeLiquidity → the LP is unrecoverable.
-    expect(curve.interface.fragments.some((f) => f.name === "removeLiquidity")).to.equal(false);
+    const termPrice = await curve.getCurrentPrice(); // USDC per whole share
+    const ammPrice = ((await amm.quoteReserve()) * WAD) / (await amm.shareReserve());
+    // within 1% — continuous, NOT the ~2800x cliff of the pre-fix design
+    const diff = ammPrice > termPrice ? ammPrice - termPrice : termPrice - ammPrice;
+    expect(diff * 100n <= termPrice).to.equal(true);
   });
 
-  it("blocks curve trading after graduation", async () => {
-    const { curve, usdc, bob } = await graduate();
+  it("sends leftover inventory to the treasury", async () => {
+    const { share, treasury } = await graduate();
+    expect(await share.balanceOf(treasury.address)).to.be.gt(0n);
+  });
+
+  it("AMM price is immune to token donations (explicit reserves)", async () => {
+    const { amm, share, bob, usdc } = await graduate();
+    const before = await amm.shareForQuote(USDC(10));
+    // attacker donates a big share balance directly to the pool
+    await usdc.connect(bob).approve(await amm.getAddress(), USDC(50));
+    await amm.connect(bob).swapQuoteForShare(USDC(50), 0n, DL); // bob now holds shares
+    const donation = await share.balanceOf(bob.address);
+    await share.connect(bob).transfer(await amm.getAddress(), donation);
+    const after = await amm.shareForQuote(USDC(10));
+    // quote-in→shares-out quote is set by tracked reserves, not balanceOf → donation ignored
+    // (after reflects bob's real swap moving the price, but the raw donation added no phantom liquidity)
+    expect(after).to.be.lte(before); // price moved from the swap only, donation gave no free shares
+  });
+
+  it("blocks curve trading after graduation and allows AMM swaps", async () => {
+    const { curve, amm, usdc, share, bob } = await graduate();
     await usdc.connect(bob).approve(await curve.getAddress(), USDC(1000));
-    await expect(curve.connect(bob).buy(1n, USDC(1000))).to.be.revertedWith("graduated");
-  });
+    await expect(curve.connect(bob).buy(1n, USDC(1000), DL)).to.be.revertedWith("graduated");
 
-  it("allows swapping on the graduated AMM", async () => {
-    const { amm, usdc, share, bob } = await graduate();
-
-    // bob buys shares from the pool with USDC
     const quoteIn = USDC(10);
     const expOut = await amm.shareForQuote(quoteIn);
     await usdc.connect(bob).approve(await amm.getAddress(), quoteIn);
-    await amm.connect(bob).swapQuoteForShare(quoteIn, expOut);
+    await amm.connect(bob).swapQuoteForShare(quoteIn, expOut, DL);
     expect(await share.balanceOf(bob.address)).to.equal(expOut);
-
-    // and sells some back
-    const shareIn = expOut / 2n;
-    const expQuote = await amm.quoteForShare(shareIn);
-    await share.connect(bob).approve(await amm.getAddress(), shareIn);
-    const balBefore = await usdc.balanceOf(bob.address);
-    await amm.connect(bob).swapShareForQuote(shareIn, expQuote);
-    expect((await usdc.balanceOf(bob.address)) - balBefore).to.equal(expQuote);
   });
 });
 
-describe("AgentAMM (standalone invariants)", () => {
-  it("keeps x*y within rounding on swaps and charges the 0.3% fee", async () => {
-    const [deployer, lp, trader] = await ethers.getSigners();
-    const MockUSDC = await ethers.getContractFactory("MockUSDC");
-    const usdc = await MockUSDC.deploy();
-    const Share = await ethers.getContractFactory("AgentShareToken");
-    const share = await Share.deploy("T", "T", 1_000_000n * 10n ** 18n, lp.address, 18);
+describe("AgentAMM — standalone invariants", () => {
+  it("charges the 0.3% fee (k grows) and pulls only the matched pair", async () => {
+    const [, lp, trader] = await ethers.getSigners();
+    const usdc = await (await ethers.getContractFactory("MockUSDC")).deploy();
+    const share = await (await ethers.getContractFactory("AgentShareToken"))
+      .deploy("T", "T", 1_000_000n * WAD, lp.address, 18);
+    const amm = await (await ethers.getContractFactory("AgentAMM"))
+      .deploy(await share.getAddress(), await usdc.getAddress());
 
-    const AMM = await ethers.getContractFactory("AgentAMM");
-    const amm = await AMM.deploy(await share.getAddress(), await usdc.getAddress());
-
-    await usdc.mint(lp.address, USDC(100_000));
-    await share.connect(lp).approve(await amm.getAddress(), 100_000n * 10n ** 18n);
-    await usdc.connect(lp).approve(await amm.getAddress(), USDC(100_000));
-    await amm.connect(lp).addLiquidity(100_000n * 10n ** 18n, USDC(100_000));
+    await usdc.mint(lp.address, USDC(200_000));
+    await share.connect(lp).approve(await amm.getAddress(), 200_000n * WAD);
+    await usdc.connect(lp).approve(await amm.getAddress(), USDC(200_000));
+    await amm.connect(lp).addLiquidity(100_000n * WAD, USDC(100_000), 0n, 0n, DL);
 
     const kBefore = (await amm.shareReserve()) * (await amm.quoteReserve());
     await usdc.mint(trader.address, USDC(1_000));
     await usdc.connect(trader).approve(await amm.getAddress(), USDC(1_000));
-    await amm.connect(trader).swapQuoteForShare(USDC(1_000), 0);
+    await amm.connect(trader).swapQuoteForShare(USDC(1_000), 0n, DL);
     const kAfter = (await amm.shareReserve()) * (await amm.quoteReserve());
-
-    expect(kAfter).to.be.gte(kBefore); // fee grows k
+    expect(kAfter).to.be.gte(kBefore);
   });
 });

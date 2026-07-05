@@ -76,6 +76,17 @@ USDC on Base mainnet: `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`.
 
 ## Status
 
-Nivel 2 reference implementation, **pre-audit**. Tests green (`npm test`). Before mainnet:
-professional audit, fuzz/invariant tests (Foundry), and a review of the graduation seeding
-price against the curve's final price to minimize the launch/AMM price gap.
+Nivel 2 reference implementation, **pre-audit**. Tests green (`npm test`, 13 passing).
+
+**Internal audit fixes applied** (see the 3-front audit): graduation now seeds the AMM at
+~the curve's terminal price (no ~2800× price cliff); the AMM uses **explicit reserves** (not
+`balanceOf`) so donations can't move price / no first-depositor attack; `addLiquidity` pulls
+only the matched pair; **deadlines** on all curve/AMM state changes; `launch()` is **gated**
+(authorized launchers unless `publicLaunch`) and **Pausable**; inventory is donation-proof
+(`curveSupply − sold`); leftover inventory → treasury; graduation config is validated.
+
+**Still open before mainnet:** professional audit; **Foundry fuzz/invariant suite** (curve
+solvency, k-monotonicity, graduation reachability, seed-price bounds); the graduating buy is
+not partial-filled (a single oversized buy can overshoot `graduationRaise`); and the whole
+Product-B / buyback / treasury / conversion layer in [docs/TOKENOMICS.md](docs/TOKENOMICS.md)
+is still to build. Do not deploy to mainnet with real funds until audited.

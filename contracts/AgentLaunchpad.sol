@@ -4,27 +4,37 @@ pragma solidity ^0.8.24;
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/utils/Pausable.sol";
 import "./AgentShareToken.sol";
 import "./AgentBondingCurve.sol";
 
 /**
  * @title AgentLaunchpad
- * @notice Factory + registry for dobx agent fair launches. Each launch deploys an
- *         {AgentShareToken} (fixed supply) and an {AgentBondingCurve}, mints the whole
- *         supply into the curve, and records the trio. Off-chain, the dobx backend calls
- *         this for the operator whose DOBI asset is being tokenized; on-chain it is
- *         permissionless, with `creator` recorded as the caller.
+ * @notice Factory + registry for dobx agent fair launches (Product A). Each launch deploys an
+ *         {AgentShareToken} (fixed supply) + an {AgentBondingCurve}, mints the supply into the
+ *         curve, validates the economics, and records the trio.
  *
- * The quote token (USDC) and the platform treasury (which receives buy fees and, after
- * graduation, holds the locked LP position via the curve) are set by the owner.
+ * Security-hardened vs the initial draft (audit fixes):
+ *  - **Gated launches**: `launch()` is restricted to authorized launchers (the dobx backend /
+ *    verified operators) unless `publicLaunch` is enabled — enforcing on-chain the "gated
+ *    off-chain" intent and preventing spam/impersonation.
+ *  - **Pausable** launching.
+ *  - **Config validation**: rejects graduation targets that are unreachable or that would make
+ *    the AMM seed revert / be pathological.
+ *  - Fee caps enforced here AND (tighter) in the curve.
+ *
+ * Note: `name`/`symbol` are attacker-controllable in principle; frontends MUST use the
+ * registry `agentId`/addresses as identity, never the string metadata.
  */
-contract AgentLaunchpad is Ownable {
+contract AgentLaunchpad is Ownable, Pausable {
     using SafeERC20 for IERC20;
 
     IERC20 public quoteToken;         // USDC
-    address public platformTreasury;  // fee recipient
-    uint16 public maxBuyFeeBps = 500;  // 5% cap
-    uint16 public maxSellFeeBps = 500; // 5% cap
+    address public platformTreasury;  // fee recipient + leftover-A treasury
+    uint16 public maxBuyFeeBps = 500;  // 5%
+    uint16 public maxSellFeeBps = 500; // 5%
+    bool public publicLaunch;          // if false, only authorized launchers may launch
+    mapping(address => bool) public authorizedLauncher;
 
     struct Launch {
         address token;
@@ -38,6 +48,8 @@ contract AgentLaunchpad is Ownable {
 
     event QuoteTokenUpdated(address indexed quoteToken);
     event TreasuryUpdated(address indexed treasury);
+    event LauncherAuthorized(address indexed launcher, bool allowed);
+    event PublicLaunchSet(bool enabled);
     event AgentLaunched(
         uint256 indexed agentId,
         address indexed token,
@@ -53,15 +65,21 @@ contract AgentLaunchpad is Ownable {
         uint256 supply;          // total share supply in WHOLE shares (minted x1e18)
         uint256 basePrice;       // USDC base units per whole share at sold=0
         uint256 slope;           // USDC base units added per whole share sold
-        uint256 buyFeeBps;       // fee to platform treasury on buys
-        uint256 sellFeeBps;      // fee retained by the pool on sells
+        uint256 buyFeeBps;
+        uint256 sellFeeBps;
         uint256 graduationRaise; // USDC (net) that triggers curve → AMM graduation
+    }
+
+    modifier canLaunch() {
+        require(publicLaunch || authorizedLauncher[msg.sender] || msg.sender == owner(), "not authorized");
+        _;
     }
 
     constructor(address _owner, address _quoteToken, address _platformTreasury) Ownable(_owner) {
         require(_quoteToken != address(0) && _platformTreasury != address(0), "zero addr");
         quoteToken = IERC20(_quoteToken);
         platformTreasury = _platformTreasury;
+        authorizedLauncher[_owner] = true;
     }
 
     // ─── Admin ────────────────────────────────────────────────────────────────
@@ -78,19 +96,35 @@ contract AgentLaunchpad is Ownable {
         emit TreasuryUpdated(_treasury);
     }
 
+    function setAuthorizedLauncher(address launcher, bool allowed) external onlyOwner {
+        authorizedLauncher[launcher] = allowed;
+        emit LauncherAuthorized(launcher, allowed);
+    }
+
+    function setPublicLaunch(bool enabled) external onlyOwner {
+        publicLaunch = enabled;
+        emit PublicLaunchSet(enabled);
+    }
+
+    function pause() external onlyOwner { _pause(); }
+    function unpause() external onlyOwner { _unpause(); }
+
     // ─── Launch ───────────────────────────────────────────────────────────────
 
-    /// @notice Deploy a new agent (share token + bonding curve) and register it.
-    function launch(LaunchParams calldata p) external returns (uint256 agentId, address token, address curve) {
-        require(p.supply > 0, "supply>0");
+    function launch(LaunchParams calldata p)
+        external
+        whenNotPaused
+        canLaunch
+        returns (uint256 agentId, address token, address curve)
+    {
+        require(p.supply > 0 && p.basePrice > 0, "bad supply/price");
         require(p.buyFeeBps <= maxBuyFeeBps && p.sellFeeBps <= maxSellFeeBps, "fee too high");
+        _validateGraduation(p);
 
         uint256 baseSupply = p.supply * 1e18;
 
-        // 1. mint the whole supply to this factory
         AgentShareToken share = new AgentShareToken(p.name, p.symbol, baseSupply, address(this), 18);
 
-        // 2. deploy the curve (fees route to the platform treasury)
         AgentBondingCurve bondingCurve = new AgentBondingCurve(
             address(share),
             address(quoteToken),
@@ -99,10 +133,11 @@ contract AgentLaunchpad is Ownable {
             p.sellFeeBps,
             p.buyFeeBps,
             p.graduationRaise,
-            platformTreasury
+            p.supply,           // curveSupply (whole shares)
+            platformTreasury,   // feeRecipient
+            platformTreasury    // treasury (leftover A)
         );
 
-        // 3. move the supply into the curve so it can sell + later seed the AMM
         IERC20(address(share)).safeTransfer(address(bondingCurve), baseSupply);
 
         agentId = launches.length;
@@ -116,6 +151,14 @@ contract AgentLaunchpad is Ownable {
 
         emit AgentLaunched(agentId, address(share), address(bondingCurve), msg.sender, p.name, p.symbol);
         return (agentId, address(share), address(bondingCurve));
+    }
+
+    /// @dev Ensure graduation is reachable before the curve sells out (leaving inventory to seed
+    ///      the AMM). The curve itself clamps the seed to a valid range, so no tight lower bound
+    ///      is needed here — only that graduation triggers before the full integral is raised.
+    function _validateGraduation(LaunchParams calldata p) internal pure {
+        uint256 fullIntegral = p.supply * p.basePrice + (p.slope * (p.supply - 1) * p.supply) / 2;
+        require(p.graduationRaise < fullIntegral, "grad unreachable");
     }
 
     // ─── Views ────────────────────────────────────────────────────────────────
