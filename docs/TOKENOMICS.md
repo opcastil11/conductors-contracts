@@ -190,7 +190,7 @@ See the audit's product review for the full analysis; legal is the critical path
 | **Revenue router w/ split** | 🟡 partial | dobx BFF `payout.service` exists but must split `R_net` into `b%` buyback + `d%` distribution, and be idempotent/authed (see backend audit). |
 | **Buyback executor** | ❌ to build | TWAP/batched buyer of A → treasury; funded by real revenue + trading fees. |
 | **Treasury** | ❌ to build | holds repurchased A (non-sellable) + the B convertible reserve. |
-| **Conversion contract (A→B)** | ❌ to build | one-way, NAV-anchored, draws B from treasury reserve, throttles on depletion. **The key new contract.** |
+| **Conversion contract (A→B)** | 🟡 prototype | `AgentConversion.sol` — one-way, NAV-anchored rate (oracle-updated + staleness bound), draws B from a bounded reserve (halts on depletion), sinks A to treasury. 6 tests. Needs the real NAV oracle + treasury wiring. |
 | **Oracle / attestation** | ❌ to build | metering proof + staked operator; feeds split + conversion rate. |
 
 **Build order (recommended):** (1) fix Product-A audit criticals → (2) B token + revenue
