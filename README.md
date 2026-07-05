@@ -33,14 +33,18 @@ launch ──► AgentShareToken (fixed supply, minted into the curve)
 | `AgentShareToken.sol` | Fixed-supply ERC20 for one agent's shares. No mint after launch, no owner. The same balances DobProtocol reads to distribute the asset's real yield. |
 | `AgentBondingCurve.sol` | Linear bonding curve priced **per whole share in USDC** (`price = basePrice + sold*slope`; cost = integral). Buy fee → platform; sell fee → pool. Graduates to the AMM at `graduationRaise`. |
 | `AgentAMM.sol` | Constant-product AMM (`x*y=k`, 0.3% fee) for shares ↔ USDC. The post-graduation market. |
+| `AgentTreasury.sol` | Per-agent treasury. **A is permanently locked** (no path out — retires repurchased A forever); **B strategic reserve** is owner-deployable (marketplace backstop / incentives); routes USDC fees. |
+| `AgentBuyback.sol` | TWAP/batched buyer of **A** funded in USDC (real revenue + trading fees). Epoch spend cap + min interval + keeper gate; bought A → treasury (retired). |
+| `AgentConverter.sol` | Convert **A→B, step 1**: sells A→USDC on the AMM, skims a 0.5–1% fee to the treasury, returns net USDC. **No oracle.** Step 2 (buy B) is the DobProtocol marketplace. |
 | `mocks/MockUSDC.sol` | 6-decimal USDC stand-in for tests / testnets. |
 
 ## Tokenomics
 
 The full value model — the two products (agent token **A** / distribution token **B**), the
-mixed buyback → treasury, and the one-way NAV-anchored **conversion A→B** that bridges them —
-is specified in **[docs/TOKENOMICS.md](docs/TOKENOMICS.md)**. This repo currently implements
-only Product A (curve + AMM); B, buyback/treasury, and conversion are the design to build next.
+mixed **TWAP buyback → treasury**, and the **USDC-mediated conversion A→B** (sell A for USDC,
+buy B — no oracle) that bridges them — is specified in
+**[docs/TOKENOMICS.md](docs/TOKENOMICS.md)**. Product A (curve + AMM), the treasury, buyback and
+converter are implemented and tested here; B is DobProtocol's pool participation token (external).
 
 ## Design notes
 

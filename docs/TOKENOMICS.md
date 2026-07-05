@@ -1,11 +1,13 @@
 # dobx.pro — Tokenomics & Mechanism Design
 
 > Canonical spec for how value flows through a dobx agent. Read this before touching the
-> contracts: today the repo implements only **Product A** (the agent token + bonding
-> curve/AMM). Product B, the buyback/treasury, and the **conversion** primitive described
-> here are the design to build next.
+> contracts.
 >
-> **Status: design proposal, pre-audit.** Parameters marked ⚙️ need final sign-off.
+> **Status: parameters signed off by the owner 2026-07-05, pre-audit.** The conversion is now a
+> **USDC-mediated swap with no NAV oracle** (see §5) — this supersedes the earlier oracle-anchored
+> `AgentConversion`, which has been removed. Contract set as of this revision: Product A (curve →
+> AMM), `AgentConverter` (A→USDC + fee), `AgentBuyback` (TWAP), `AgentTreasury` (A-sink + B
+> reserve). Product B is the DobProtocol pool participation token (no new contract).
 
 ---
 
@@ -19,12 +21,12 @@ Each agent has **two tokens**, sold as **two distinct products**, linked by a on
    speculative • bonding curve → AMM             yield-bearing • DobProtocol pool
    "bet on the agent's success"                  "collect the asset's real cash flow"
         │                                                 ▲
-        │   ─────────── CONVERSION  A → B  ───────────────┘
-        │              (move from upside to income, one-way, NAV-anchored)
+        │   ── CONVERT: sell A → USDC → buy B ────────────┘
+        │      (one-way in practice; USDC-priced, NO oracle; small fee → treasury)
         │
    BUYBACK ◄── funded by a MIX: real x402 asset revenue + curve/AMM trading fees
-        │
-        └────► TREASURY  (accumulates repurchased A; holds the B convertible reserve)
+        │       (TWAP / batched buys of A)
+        └────► TREASURY  (retires repurchased A forever; holds the strategic B reserve)
 ```
 
 In TradFi terms this is a **convertible instrument**: **A** behaves like growth equity
@@ -60,9 +62,10 @@ You can enter either product independently:
   Because supply is **fixed**, per-token yield is stable (see §5 for why conversion must not
   inflate B_supply).
 
-> ⚙️ **Chain decision:** A and B must live on the **same chain per agent** so conversion is
-> atomic. DobProtocol supports Stellar + Base; the curve/AMM contracts are EVM. → default to
-> **Base** for agents that use the fair-launch/convertible model.
+> **Chain (signed off):** A and B must live on the **same chain per agent** (the convert flow
+> routes A→USDC→B on one chain). DobProtocol supports Stellar + Base; the curve/AMM/converter/
+> buyback contracts are EVM. → the **creator picks Base or Stellar**; the EVM contract set here
+> targets Base (a Soroban port is required for Stellar-chosen agents).
 
 ---
 
@@ -80,12 +83,14 @@ You can enter either product independently:
 ```
 
 The **split of real revenue** between *buyback* (benefits A) and *distribution* (benefits B)
-is the core tokenomics knob and the point of tension between the two investor classes. It
-must be **fixed and disclosed per agent at launch** (not operator-adjustable after the fact).
+is the core tokenomics knob and the point of tension between the two investor classes. It is
+**configurable per agent but bounded, fixed and disclosed at launch** (not operator-adjustable
+after the fact).
 
-> ⚙️ **Revenue split** `R_net = R_gross − costs − fees`, then `R_net = b%·buyback +
-> d%·distribution`. Recommend a conservative, disclosed default (e.g. `b=30% / d=70%`) so
-> the income product stays the anchor and the buyback is a supplement, not the main draw.
+> **Revenue split (signed off):** `R_net = R_gross − costs − fees`, then `R_net = b%·buyback +
+> d%·distribution`, with **b (buyback) constrained to 10–50%** → distribution always ≥ 50%. The
+> bound keeps the income product the anchor and prevents a creator from starving B holders. The
+> exact split is the creator's choice within that band and is disclosed on the agent page.
 
 ---
 
@@ -104,61 +109,70 @@ must be **fixed and disclosed per agent at launch** (not operator-adjustable aft
   private mempool**, never a single naive market buy. ⚙️ pick an execution strategy.
 - **Circularity honesty:** the trading-fee portion is self-referential value; only the x402
   portion is real. Report both.
-- **Treasury governance:** who controls treasury A, and can it ever be sold back into the
-  market (dumping on holders)? → default: treasury A is **non-sellable**, usable only to back
-  conversions or provide protocol-owned liquidity. ⚙️ confirm.
+- **Treasury governance (confirmed):** treasury **A is permanently non-sellable** — the
+  contract has no path to transfer A out, so repurchased A is retired forever and can never be
+  dumped on holders. The strategic **B reserve is owner-deployable** (list on the marketplace to
+  backstop the convert flow, or fund incentives); deploying B makes it circulate and dilutes
+  per-token yield, so it is a **disclosed governance lever**, not a locked balance.
 
 ---
 
-## 5. Conversion A → B (the bridge) — recommended design
+## 5. Conversion A → B (the bridge) — USDC-mediated, no oracle
 
-This is the new primitive and the one non-obvious economic decision. **The naive version is
-unsafe**, so the recommended design is specific.
+This is the bridge between the two products. An earlier draft made it a bespoke primitive with
+a NAV oracle and a minted/reserve-drawn B; that was **rejected in favor of something simpler and
+safer**. The insight: because DobProtocol pools **distribute and trade in USDC**, "convert A to
+B" is just **sell A for USDC, then buy B with USDC**. No oracle, no special rate, no new price
+to trust or manipulate — each side is priced by its own market.
 
-### Why a fixed peg is wrong
-Real cash flow `R` is **fixed** by the asset. B holders split `R` pro-rata, so
-`yield_per_B = R / B_supply`. If conversion **mints new B** at a fixed rate with no cap, then
-every conversion grows `B_supply` and **dilutes every B holder's yield toward zero**. A 1:1,
-unbounded, mint-on-convert design collapses the income product. **Do not do this.**
+### Why the old peg/oracle design was dropped
+- A **fixed mint-on-convert peg** grows `B_supply` and dilutes `yield_per_B = R / B_supply`
+  toward zero — it collapses the income product.
+- A **NAV-oracle rate** removes the dilution but adds a trusted/manipulable price feed and a
+  bounded reserve that halts conversions — complexity and a new attack surface.
+- **USDC routing sidesteps both:** you get exactly what the two open markets say A and B are
+  worth, and B's fixed supply is untouched because you **buy existing B**, you don't mint it.
 
-### Recommended mechanism
-1. **B supply is fixed** (it's fractional ownership of the asset's cash flow). Conversion does
-   **not mint** B — it **transfers existing B out of the treasury reserve**.
-2. At launch, allocate a **convertible reserve** of B into the treasury (⚙️ e.g. 40–60% of B
-   supply). The rest of B is sold directly as Product B (primary income sale).
-3. **Conversion is one-way (A → B only).** A holder deposits/burns A and receives B from the
-   treasury reserve. One-way avoids a bidirectional arbitrage loop and makes A monotonically
-   deflationary as the ecosystem matures toward income.
-4. **Rate is anchored to value (NAV), not fixed.** You receive B worth (approximately) the
-   market value of the A you convert:
-   `B_out ≈ (price_A / price_B) · A_in`, where `price_B` reflects B's yield-backed fair value
-   (its market/pool price or a NAV oracle of discounted future cash flow). This makes
-   conversion **arbitrage-neutral**: A can never trade far below "the B you'd get by
-   converting," which is exactly the **fundamental floor** that ties A to real yield.
-5. **Reserve exhaustion is the natural cap.** When the treasury's B reserve runs low,
-   conversion throttles/stops — which automatically bounds `B_supply` in circulation and
-   protects per-B yield. The buyback keeps refilling the treasury with A (value), and the
-   protocol can top up the B reserve from the fixed allocation, never beyond it.
+### The mechanism (signed off)
+1. **Two hops through USDC.** `A ──sell on AgentAMM──► USDC ──buy on DobProtocol marketplace──► B`.
+   `price_B` is simply what B costs in USDC on its marketplace; `price_A` is the AMM price.
+2. **On-chain half = `AgentConverter`.** It does the atomic, trust-minimized part: pull A, sell
+   it on the AMM, **skim a small convert fee (0.5–1%) to the treasury**, return net USDC to the
+   user. Selling A directly on the AMM is always possible and fee-free — the fee is the price of
+   the one-click "convert" product and it funds the treasury.
+3. **Off-chain half = step 2.** The user (or the dApp for them) buys B on the DobProtocol
+   marketplace with that USDC. The marketplace is **listing-based, not an AMM**, so the two hops
+   **can't be a single atomic tx** — convert is a **2-step flow**.
+4. **Liquidity backstop.** So B is always buyable, the **treasury lists part of its strategic B
+   reserve** on the marketplace (see §4). If peer listings are thin, the protocol's reserve is
+   the counterparty.
+5. **One-way in practice.** There's a symmetric B→A path (sell B, buy A) but the product only
+   surfaces A→B; the design nudges holders from speculation toward income, not back.
 
 ### Result
-- **A holders** get: momentum upside + buyback support + a real-yield floor via convertibility.
-- **B holders** get: stable pro-rata yield, protected from dilution because supply is fixed and
-  conversion draws from a bounded reserve, not a mint.
+- **A holders** can always exit into income at the real market rate of B — a genuine
+  yield-linked exit, priced by markets not by a trusted oracle.
+- **B holders** are **not diluted by conversion**: no B is minted; convert buys existing B. The
+  only thing that increases circulating B is the treasury *choosing* to deploy its reserve — a
+  disclosed governance action, not an automatic mint.
+- **No oracle in the conversion path** → one fewer trusted component and manipulation surface.
 - **The two products stay coherent:** the same real revenue funds (a) the buyback that supports
-  A and refills the treasury, and (b) the distribution that pays B — split by the disclosed
-  `b%/d%`.
+  A and (b) the distribution that pays B — split by the disclosed, bounded `b%/d%`.
 
-> ⚙️ **Open parameters:** convertible reserve size, `price_B` source (pool price vs NAV
-> oracle), conversion fee (if any), throttle curve as the reserve depletes.
+> ⚙️ **Open parameters:** exact convert fee within 0.5–1%, size of the treasury B reserve
+> actually listed as backstop vs held, whether to offer an aggregator that bundles the 2 steps
+> in the UI.
 
 ---
 
-## 6. The oracle dependency (unavoidable)
+## 6. The revenue-attestation dependency (unavoidable)
 
-Both the **revenue split** (§3) and the **conversion rate** (§5, if NAV-based) depend on the
-asset's **real reported revenue**. Today that number is *asserted* by DOBI (x402 settles the
-payment, but the metering is trusted). This is the project's central trust gap. Before real
-money, add: independent metering attestation (hardware signature / third-party auditor), a
+The **revenue split** (§3) — and any NAV/yield figure shown in the UI — depends on the asset's
+**real reported revenue**. (Note the conversion no longer needs a price oracle at all, §5 — this
+gap is now only about *how much revenue is real*, not about pricing the conversion.) Today that
+number is *asserted* by DOBI (x402 settles the payment, but the metering is trusted). This is the
+project's central trust gap. Before real money, add: independent metering attestation (hardware
+signature / third-party auditor), a
 **staked operator with slashing** for under-reporting, and asset insurance. Until then, every
 NAV/yield figure is "trust the operator," and that must be disclosed.
 
@@ -184,29 +198,31 @@ See the audit's product review for the full analysis; legal is the critical path
 
 | Component | Status | Notes |
 |---|---|---|
-| `AgentShareToken` (A) | ✅ built | fixed-supply ERC-20. **Must become snapshot/checkpoint-capable** only if ever distributed over — but in this model A is *not* distributed over, so plain ERC-20 is fine. |
-| `AgentBondingCurve` + `AgentAMM` (A market) | ✅ built | audit fixes required before mainnet: graduation price-cliff, `balanceOf` reserves, `launch()` gating, pausing, MEV. |
-| **Distribution Token (B)** | ❌ to build | the DobProtocol participation token / pool for the agent. Fixed supply. Receives x402 revenue pull-based. |
-| **Revenue router w/ split** | 🟡 partial | dobx BFF `payout.service` exists but must split `R_net` into `b%` buyback + `d%` distribution, and be idempotent/authed (see backend audit). |
-| **Buyback executor** | ❌ to build | TWAP/batched buyer of A → treasury; funded by real revenue + trading fees. |
-| **Treasury** | ❌ to build | holds repurchased A (non-sellable) + the B convertible reserve. |
-| **Conversion contract (A→B)** | 🟡 prototype | `AgentConversion.sol` — one-way, NAV-anchored rate (oracle-updated + staleness bound), draws B from a bounded reserve (halts on depletion), sinks A to treasury. 6 tests. Needs the real NAV oracle + treasury wiring. |
-| **Oracle / attestation** | ❌ to build | metering proof + staked operator; feeds split + conversion rate. |
+| `AgentShareToken` (A) | ✅ built | fixed-supply ERC-20. A is *not* distributed over, so plain ERC-20 is fine (no snapshot needed). |
+| `AgentBondingCurve` + `AgentAMM` (A market) | ✅ built | audit-hardened: graduation seeds AMM at terminal price (no cliff), explicit reserves, gated + pausable launch, deadlines. |
+| **Distribution Token (B)** | ✅ external | the **DobProtocol pool participation token** — no new contract; B lives + trades (USDC) on DobProtocol's existing marketplace. Fixed supply, pull-based x402 yield. |
+| **Revenue router w/ split** | 🟡 partial | dobx BFF `payout.service` exists but must split `R_net` into `b%` buyback (fund `AgentBuyback`) + `d%` distribution (DobProtocol), bounded 10–50%, idempotent/authed. |
+| **`AgentBuyback`** | ✅ built | TWAP/batched buyer of A → treasury; funded (USDC) by real revenue + trading fees; epoch spend cap + min interval; keeper-gated. Tests ✔. |
+| **`AgentTreasury`** | ✅ built | A permanently locked (no path out); B strategic reserve owner-deployable (marketplace backstop / incentives); routes USDC fees. Tests ✔. |
+| **`AgentConverter` (A→B step 1)** | ✅ built | sells A→USDC on the AMM, skims 0.5–1% fee to treasury, returns net USDC; **no oracle**. Step 2 (buy B) is the DobProtocol marketplace. Replaced the oracle-based `AgentConversion`. Tests ✔. |
+| **Attestation / staking** | ❌ to build | metering proof + staked/slashable operator; feeds the revenue split's honesty (no longer feeds conversion — §5/§6). |
 
-**Build order (recommended):** (1) fix Product-A audit criticals → (2) B token + revenue
-split in the router → (3) buyback + treasury → (4) conversion contract → (5) oracle/staking.
-Legal/SPV/KYC runs in parallel and gates any public, real-money launch.
+**Build order:** (1) ✅ Product-A audit fixes → (2) ✅ buyback + treasury + converter →
+(3) revenue router split in the BFF (bounded 10–50%) → (4) attestation/staking → then Foundry
+fuzz + external audit. Legal/SPV/KYC runs in parallel and gates any public, real-money launch.
 
 ---
 
-## 9. Open parameters (sign-off checklist) ⚙️
+## 9. Parameters — signed off 2026-07-05
 
-- [ ] Chain per agent (recommend Base for the convertible model)
-- [ ] Revenue split `b% buyback / d% distribution` (recommend 30/70)
-- [ ] Buyback funding mix: % from x402 real vs % from trading fees (disclose both)
-- [ ] Buyback execution: TWAP / batched / private mempool
-- [ ] Treasury A: non-sellable? governance?
-- [ ] B total supply + convertible reserve size (recommend reserve 40–60% of B)
-- [ ] Conversion `price_B` source: pool price vs NAV oracle
-- [ ] Conversion fee + depletion throttle curve
-- [ ] Oracle/attestation design + operator stake/slashing
+- [x] **Chain per agent:** creator picks **Base or Stellar** (A and B must share a chain).
+- [x] **Revenue split:** configurable per agent, **buyback bounded 10–50%** (distribution ≥50%).
+- [x] **Buyback funding mix:** real x402 revenue + curve/AMM trading fees (disclose both fractions).
+- [x] **Buyback execution:** **TWAP / batched** (epoch spend cap + min interval; keeper cron).
+- [x] **Treasury A:** **non-sellable, permanent**. Treasury B: strategic reserve (~50%), owner-deployable.
+- [x] **Conversion `price_B`:** anchored to **USDC via the two open markets — no NAV oracle**.
+- [x] **Conversion fee:** **0.5–1%** → treasury. No reserve-depletion throttle (buys existing B on market).
+- [ ] **Attestation / operator stake-slash** — still open (§6), the remaining trust gap for real revenue.
+
+Still gating a public real-money launch (out of scope of the contracts): **SPV per asset/basket +
+Reg D 506(c)/Reg S + KYC/geo-fence** (§7) and the **revenue attestation** (§6).
