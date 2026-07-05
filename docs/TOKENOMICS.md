@@ -178,19 +178,27 @@ NAV/yield figure is "trust the operator," and that must be disclosed.
 
 ---
 
-## 7. Regulatory framing (must read before launch)
+## 7. Regulatory framing — handled by DobProtocol's distribution layer
 
-Making A **convertible into B** (a yield-bearing instrument) pulls **the entire structure**,
-A included, into securities treatment — a convertible into a security is itself a security.
-This is not avoided by the "utility token" framing. Consequences that gate a public launch:
-- **SPV per agent/basket** so B (and A-via-conversion) represents a real legal claim on the
-  asset's cash flow; otherwise holders own nothing enforceable.
-- **KYC/AML + accreditation/geo-fencing** on **both** the A sale and the B sale — the
-  launchpad cannot be a KYC-free door into a regulated instrument.
-- **Reg D 506(c) + Reg S** (or Reg A+ for retail) rather than a permissionless fair launch.
-- Disclosures covering the split, buyback, conversion, operator, and asset risks.
+**Scope decision (owner, 2026-07-05): the legal/compliance for the income side is DobProtocol's
+responsibility, not dobx's.** B *is* the DobProtocol pool participation token, and DobProtocol's
+distribution/marketplace already carries the legal structure (SPV/claim, KYC/AML, geo-fencing) for
+holding and trading it. dobx does not re-solve this.
 
-See the audit's product review for the full analysis; legal is the critical path, not code.
+The **USDC-mediated conversion (§5) makes this clean.** Because there is **no on-chain convertible
+primitive** anymore — "convert" is just *sell A for USDC on the AMM, then buy B on the DobProtocol
+marketplace* — **A is not legally welded to B.** A is a speculative token that trades for USDC; the
+regulated income instrument (B) is entered **through DobProtocol's compliant marketplace**, where
+its KYC/structure gate lives. The earlier "a convertible into a security is itself a security"
+concern was an artifact of the atomic-convertible design that has since been dropped.
+
+What remains, and where it lives:
+- **B side (income/ownership, SPV, KYC):** DobProtocol (existing). ✅ inherited.
+- **A side (the curve/AMM speculative token):** disclose it is *not* a claim on cash flow and
+  carries no yield by itself; keep the marketing honest (don't sell A as "owning the asset's
+  income" — that's B). This is a disclosure/marketing discipline, not a new legal structure.
+- **Revenue attestation (§6):** the one real remaining trust gap — how much reported revenue is
+  actually real. Independent of the legal framing above.
 
 ---
 
