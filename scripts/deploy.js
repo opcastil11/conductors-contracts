@@ -31,12 +31,25 @@ async function main() {
   console.log(`  quoteToken:       ${quote}`);
   console.log(`  platformTreasury: ${treasury}`);
 
+  // TokenomicsFactory — deploys each agent's treasury+buyback+converter post-graduation.
+  const Factory = await ethers.getContractFactory("TokenomicsFactory");
+  const factory = await Factory.deploy();
+  await factory.waitForDeployment();
+  const factoryAddr = await factory.getAddress();
+  console.log(`TokenomicsFactory: ${factoryAddr}`);
+
   // Persist addresses so other tooling (the dobx BFF E2E) can pick them up.
   const outDir = path.join(__dirname, "..", "deployments");
   fs.mkdirSync(outDir, { recursive: true });
   fs.writeFileSync(
     path.join(outDir, `${network.name}.json`),
-    JSON.stringify({ network: network.name, launchpad: launchpadAddr, quoteToken: quote, platformTreasury: treasury }, null, 2)
+    JSON.stringify({
+      network: network.name,
+      launchpad: launchpadAddr,
+      tokenomicsFactory: factoryAddr,
+      quoteToken: quote,
+      platformTreasury: treasury,
+    }, null, 2)
   );
   console.log(`Wrote deployments/${network.name}.json`);
 }
