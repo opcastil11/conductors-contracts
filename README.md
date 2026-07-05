@@ -35,6 +35,13 @@ launch ──► AgentShareToken (fixed supply, minted into the curve)
 | `AgentAMM.sol` | Constant-product AMM (`x*y=k`, 0.3% fee) for shares ↔ USDC. The post-graduation market. |
 | `mocks/MockUSDC.sol` | 6-decimal USDC stand-in for tests / testnets. |
 
+## Tokenomics
+
+The full value model — the two products (agent token **A** / distribution token **B**), the
+mixed buyback → treasury, and the one-way NAV-anchored **conversion A→B** that bridges them —
+is specified in **[docs/TOKENOMICS.md](docs/TOKENOMICS.md)**. This repo currently implements
+only Product A (curve + AMM); B, buyback/treasury, and conversion are the design to build next.
+
 ## Design notes
 
 - **Quote = USDC (6 dp).** Unlike the DobiPump/DobiSwap prototypes (which quoted in the 18-dp
