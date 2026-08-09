@@ -9,8 +9,17 @@
 > **✅ verificado** = confirmado leyendo código, con referencia · **▶ decidido** = decisión
 > tomada, sin construir todavía · **❓ abierto** = falta decidir.
 >
-> **Nada de este modelo está construido aún.** «Es la arquitectura» y «ya está en el código»
-> son afirmaciones distintas y acá no se mezclan.
+> **Actualización 09-08-2026.** La línea original de este banner decía «nada de este modelo está
+> construido aún». **Ya no es cierta y por eso se retira**: los contratos están desplegados en
+> Base Sepolia y el cruce, la gracia y la graduación están verificados contra cadena viva. Este
+> documento sigue siendo la *derivación* — qué debe pasar. Lo que **pasa** vive en
+> [`ESTADO.md`](ESTADO.md), y cuando los dos se contradigan gana ESTADO. Las llaves y sus
+> poderes están en [`OPERACION.md`](OPERACION.md).
+>
+> Dos correcciones de fondo, ambas derivadas de leer el código desplegado de DobProtocol:
+> **(a)** el «puente» A↔B no existe como problema — DobProtocol ya emite participaciones en Base
+> mainnet, ver [`dobx-pro/docs/PUENTE.md`](../../dobx-pro/docs/PUENTE.md); **(b)** el admin del
+> pool **no puede** ser el `AgentController` (§3.2 quedó corregido más abajo).
 
 ---
 
@@ -171,6 +180,19 @@ El mismo contrato absorbe la otra regla que hacía falta:
 > actualizable sin timelock reabre todo lo que cierra — quien pueda cambiarlo puede agregarle el
 > barrido después. Tiene que ser **inmutable**, o su llave estar quemada o detrás de un timelock
 > lo bastante largo como para que el mercado reaccione.
+
+> ⛔ **Corrección 09-08-2026 — «el admin del pool es el controller» no es implementable.**
+> Contra el `PoolMasterV2` que DobProtocol tiene desplegado en Base, `createTreasuryPool` hace
+> dueño del pool a `users[0]`, y en la lógica v2 (auditoría 2026-08, hallazgo B-1)
+> `createDistribution` es **owner-only**. `AgentController` no tiene passthrough de llamadas, así
+> que ponerlo de dueño dejaría al pool **sin nadie capaz de repartir**.
+>
+> La separación correcta: **dueño del pool** = quien opera las distribuciones (una wallet);
+> **`AgentController`** = custodio del B y único emisor de la razón de conversión. Lo que este
+> §3.2 quería garantizar **no se pierde** — sigue siendo cierto que nadie puede sacarle B a un
+> converter, cambiar la razón después de `activate()`, ni mover quote a un destino distinto del
+> `capexSink`. Lo que se cae es la frase «el admin del pool es un contrato, no una wallet».
+> Derivación completa en [`dobx-pro/docs/PUENTE.md`](../../dobx-pro/docs/PUENTE.md) §4.
 
 ### 3.3 Relación de precios
 
@@ -422,10 +444,18 @@ Consecuencias, no objeciones: cada una nace de una de las resoluciones de arriba
 | 5 | **Calibración numérica descuento ↔ curva** para un agente real. Sin esto §3.4 es teoría. | §3.4 | ❓ decidir |
 | 6 | **El arbitraje solo existe para quien pasa el KYC.** | §3.3 | asumido |
 | 7 | Atestación del ingreso (`OperatorStake` ya construido, la atestación misma no). | — | heredado de `TOKENOMICS.md` §6 |
+| 8 | **Granularidad de B.** El `ParticipationToken` de DobProtocol tiene `decimals() == 0` y el límite de shares es 10 000 000. Si el pool se crea con porcentajes 1–100, toda conversión normal revierte con `"dust"`. | PUENTE §3.3 | ❓ decidir antes de cablear |
+| 9 | **Separación dueño-del-pool / controller** y su consecuencia en la UI (mostrar montos de 0 decimales). | PUENTE §3.4, §4 | ▶ decidido acá, falta construir |
 
 ---
 
 ## 8. Impacto en el código
+
+> **Estado 09-08-2026:** esta sección se escribió como trabajo futuro y ya no lo es. Las tres
+> tablas están **ejecutadas** salvo lo que marca [`ESTADO.md`](ESTADO.md) §5. Lo que queda
+> pendiente de este capítulo, en concreto: **calibrar** el precio terminal contra la producción
+> por acción (sigue abierto), y **cablear el pool real** en lugar de `MockParticipation`
+> (ver [`dobx-pro/docs/PUENTE.md`](../../dobx-pro/docs/PUENTE.md) §3).
 
 ### `dobx-contracts`
 | Acción | Qué |

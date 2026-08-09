@@ -119,12 +119,21 @@ with 30% retained, 1 A → 0.7 B for the first converter and the last alike.
 
 ## 4. What is still open
 
+> **Updated 09-08-2026.** Items 2–4 below shipped; the live addresses, the agents that carry a
+> crossing, and the three on-chain E2E runs are inventoried in **[ESTADO.md](ESTADO.md)**. Key
+> roles, the threat model and the key-separation plan are in **[OPERACION.md](OPERACION.md)**.
+
 1. ✅ Contracts complete + tested (42 green).
-2. ⛔ Deploy to Base Sepolia — **needs funded deployer key (owner)**.
-3. BFF chain-adapter behind `MARKET_MODE` (buildable now against a local hardhat node).
-4. Web signing flow: approve A → `controller.convert`, wallet-signed, single step.
-5. TOKENOMICS-V2 §4.2 — released reserve is DOBX while capex is fiat. Converting it to fund an
+2. ✅ Deployed to Base Sepolia — see [ESTADO.md](ESTADO.md) §1.
+3. ✅ BFF chain-adapter behind `MARKET_MODE`, live against Base Sepolia.
+4. ✅ Web signing flow: approve A → `controller.convert`, wallet-signed, single step.
+5. ⛔ TOKENOMICS-V2 §4.2 — released reserve is DOBX while capex is fiat. Converting it to fund an
    asset means selling DOBX, which opposes the sink. Unresolved; do not deploy real capex flow
-   until it is.
+   until it is. Options written up in [dobx-pro/docs/PUENTE.md](../../dobx-pro/docs/PUENTE.md) §6.
 6. Foundry fuzz/invariant suite: curve solvency **across conversions**, k-monotonicity, the
    post-graduation LP-shrink price invariant.
+7. ⛔ Product B is still `MockParticipation` in every run. Wiring the real DobProtocol pool is
+   [PUENTE.md](../../dobx-pro/docs/PUENTE.md) §3 — and note §3.3: the participation token has
+   `decimals() == 0`, so pool share granularity decides the minimum conversion.
+8. ⛔ Key separation before mainnet — [OPERACION.md](OPERACION.md) §3. Today one key is deployer,
+   owner, treasury, attestor and BFF signer.
