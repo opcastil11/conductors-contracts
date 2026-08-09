@@ -5,13 +5,19 @@ import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 
 /**
  * @title AgentShareToken
- * @notice The tradeable ERC20 that represents shares of a single dobx agent (a real-world
- *         asset operated in DOBI). Fixed supply, minted once to the bonding curve at launch.
+ * @notice Product A — the tradeable ERC20 of a single dobx agent. Fixed supply, minted once to
+ *         the bonding curve at launch, priced in DOBX.
  *
- * The same balances are what DobProtocol's distribution reads to pay out the agent's real
- * revenue (yield) to holders — so holding this token is both a market position AND a claim
- * on the asset's cash flow. This contract stays deliberately minimal (no mint after launch,
- * no owner) so the supply is fixed and trust-minimized.
+ * A does NOT receive distributions. Its link to the agent's real revenue is the RIGHT TO CONVERT
+ * one-way into Product B (a DobProtocol future-revenue pool participation) — see
+ * {AgentController} and docs/TOKENOMICS-V2.md §2/§3. That is what puts a floor under A
+ * (`P_A ≥ P_B`, modulo the retention ratio and the DOBX/USDC leg) without A itself being a
+ * cash-flow instrument.
+ *
+ * Deliberately minimal (no mint after launch, no owner, no upgrade) so the supply is fixed and
+ * trust-minimized. `burn` is the ONE supply-side operation, and it only ever reduces supply: the
+ * curve burns the A it receives from a conversion, which is what makes "el A convertido queda
+ * inmovilizado" a verifiable fact rather than a promise.
  */
 contract AgentShareToken is ERC20 {
     uint8 private immutable _decimals;
@@ -38,5 +44,10 @@ contract AgentShareToken is ERC20 {
 
     function decimals() public view override returns (uint8) {
         return _decimals;
+    }
+
+    /// @notice Burn from the caller's own balance. Used by {AgentBondingCurve} on conversion.
+    function burn(uint256 amount) external {
+        _burn(msg.sender, amount);
     }
 }

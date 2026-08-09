@@ -3,6 +3,12 @@
 > Canonical spec for how value flows through a dobx agent. Read this before touching the
 > contracts.
 >
+> **⚠️ SUPERSEDED 2026-08-08 by [TOKENOMICS-V2.md](TOKENOMICS-V2.md).** Kept for history only.
+> The buyback / treasury / USDC-mediated-conversion layer described below was never the shipped
+> model: `AgentBuyback`, `AgentTreasury`, `AgentConverter` and `TokenomicsFactory` have been
+> **deleted from the repo**, the quote token is now DOBX rather than USDC, and the A→B conversion
+> is a single one-way step through `AgentController`. Do not implement against this file.
+>
 > **Status: parameters signed off by the owner 2026-07-05, pre-audit.** The conversion is now a
 > **USDC-mediated swap with no NAV oracle** (see §5) — this supersedes the earlier oracle-anchored
 > `AgentConversion`, which has been removed. Contract set as of this revision: Product A (curve →

@@ -1,92 +1,130 @@
 # dobx-contracts — Deployment Runbook
 
-Status of the suite (verified 2026-07-06): **41 Hardhat + 11 Foundry tests passing**, git-clean,
-`deploy.js` exercised locally (`deployments/localhost.json`, `deployments/hardhat.json`). The only
-thing standing between here and a live **Base Sepolia** deployment is a **funded deployer key** — an
-owner-supplied credential. This file is the single owner step + the canonical launch params.
+Status of the suite (verified 2026-08-08): **42 Hardhat tests passing**, `deploy.js` exercised
+locally. This file is the owner step, the canonical launch params, and the per-agent wiring that
+turns a launched A market into a two-product agent.
+
+Model reference: **[TOKENOMICS-V2.md](TOKENOMICS-V2.md)**.
 
 ---
 
-## 1. The one owner step — deploy to Base Sepolia
+## 1. Platform deploy (once per network)
 
 The repo has **no `.env`** on purpose (no key committed). To deploy you must supply a funded key.
 
 ```bash
 cd dobx-contracts
 
-# 1. Fund a throwaway deployer wallet with Base Sepolia ETH (faucet: https://www.alchemy.com/faucets/base-sepolia).
+# 1. Fund a throwaway deployer wallet with Base Sepolia ETH
+#    (faucet: https://www.alchemy.com/faucets/base-sepolia).
 
 # 2. Create .env (gitignored — NEVER commit it). Minimum:
 #    PRIVATE_KEY=0x<funded deployer key>
-#    USE_MOCK_USDC=1                # fresh testnet has no canonical USDC → deploy a MockUSDC
-#    BASE_SEPOLIA_RPC_URL=https://sepolia.base.org   # optional; this is the default
+#    PLATFORM_TREASURY=0x<address that receives the DOBX supply + platform fees>
+#    KYC_ATTESTOR=0x<address allowed to flip approvals>   # defaults to the deployer
+#    BASE_SEPOLIA_RPC_URL=https://sepolia.base.org        # optional; this is the default
 #    BASESCAN_API_KEY=<optional, for verification>
 cp .env.example .env && $EDITOR .env
 
-# 3. Deploy launchpad + tokenomics factory (+ MockUSDC on testnet).
+# 3. Deploy DOBX + KycRegistry + AgentControllerFactory + AgentLaunchpad.
 npm run deploy:baseSepolia
-#   → writes deployments/baseSepolia.json { launchpad, tokenomicsFactory, quoteToken, platformTreasury }
-
-# 4. (mainnet, later) real USDC is 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913 → drop USE_MOCK_USDC,
-#    set QUOTE_TOKEN to it, and: npm run deploy:base
+#   → writes deployments/baseSepolia.json
+#     { launchpad, dobx, kycRegistry, controllerFactory, quoteToken, platformTreasury }
 ```
 
-`deployments/baseSepolia.json` is the handoff artifact — the dobx BFF chain-adapter reads the
-launchpad + factory + quoteToken addresses from it.
+> **`DOBX_ADDRESS` after the first deploy.** Re-running without it mints a *second* DOBX and
+> silently fragments the quote token across curves. Always set `DOBX_ADDRESS` to the existing
+> one on every subsequent run. `quoteToken` in the artifact is the same address — it exists so
+> the BFF has one stable key to read.
+
+`deployments/<network>.json` is the handoff artifact — the dobx BFF chain-adapter reads these
+addresses from it.
 
 **Security:** the deployer key is the launchpad `owner` and the sole `authorizedLauncher` until it
-authorizes the dobx backend signer (`setAuthorizedLauncher(backendSigner, true)`) or flips
-`setPublicLaunch(true)`. Keep it offline; rotate before mainnet. Do NOT paste it into chat or commit
-`.env`.
+authorizes the dobx backend signer (`setAuthorizedLauncher(backendSigner, true)`). It is also the
+only caller of `deployController`. Keep it offline; rotate before mainnet. Do NOT paste it into
+chat or commit `.env`.
 
 ---
 
 ## 2. Canonical launch params (must match the BFF market)
 
-The bonding curve prices per **whole share** in **USDC base units (6 dp)**, and the slope is an
-**integer**: `price(sold) = basePrice + sold*slope`, cost = the exact integral. That integer
-constraint pins the demo economics. The dobx BFF (`apps/api/.../market.service.js`) mirrors these:
+The curve prices per **whole share** in **DOBX (18 dp)**: `price(sold) = basePrice + sold*slope`,
+cost = the exact integral. The dobx BFF (`apps/api/.../market.service.js`) mirrors these.
 
 | Param | Value | On-chain (`LaunchParams`) |
 |-------|-------|---------------------------|
-| Base price | **$0.05** | `basePrice = 50_000` (0.05 × 1e6) |
-| Slope | **1e-6 USDC/share** | `slope = 1` (smallest integer step) |
-| Terminal price | **$0.25** | reached at `sold = 200_000` |
+| Base price | **0.05 DOBX** | `basePrice = 5e16` |
+| Slope | **1e-6 DOBX/share** | `slope = 1e12` |
+| Terminal price | **0.25 DOBX** | reached at `sold = 200_000` |
 | Graduation supply | **200,000 shares** | — |
-| Graduation raise | **≈ $29,999.90** | `graduationRaise = 29_999_900_000` base units |
+| Graduation raise | **29,999.9 DOBX** | `graduationRaise = 29999900000000000000000` |
 | Total share supply | per-agent (e.g. 1,000,000) | `supply` (whole shares, minted ×1e18) |
-| Convert fee | **0.75%** → treasury | `AgentConverter` fee bps = 75 (TOKENOMICS §5 band 0.5–1%) |
-
-> ⚠️ **Why not 400k?** A $0.05→$0.25 span over **400k** shares needs slope = 0.5 base units/share,
-> which the integer curve can't represent. **200k** is the largest graduation supply that keeps the
-> terminal at exactly $0.25 with an integer slope. The BFF's `GRAD_SUPPLY` was moved 400k→200k to
-> match (2026-07-06). If a different terminal is acceptable, slope=1 with grad=400k gives terminal $0.45.
 
 Example `launch(LaunchParams)` for a 1,000,000-share agent:
 ```
 name, symbol,
 supply           = 1_000_000,
-basePrice        = 50_000,        // $0.05
-slope            = 1,             // 1e-6 USDC/share
-buyFeeBps        = 100,           // 1% (≤ maxBuyFeeBps 500)
-sellFeeBps       = 100,           // 1%
-graduationRaise  = 29_999_900_000 // ≈ $30k net raised → curve graduates into the AMM
+basePrice        = 5e16,     // 0.05 DOBX
+slope            = 1e12,     // 1e-6 DOBX per share sold
+buyFeeBps        = 100,      // 1% (≤ maxBuyFeeBps 500)
+sellFeeBps       = 100,      // 1%
+graduationRaise  = 29999900000000000000000
 ```
 `_validateGraduation` requires `graduationRaise < fullIntegral(supply)`, satisfied here.
 
+> ⚠️ **The terminal price is not a free parameter.** It is coupled to the pool's discount rate by
+> the rationality constraint of TOKENOMICS-V2 §3.4: `total_produccion / total_shares ≥ P_A`. A
+> terminal price above the per-share production makes conversion irrational for everyone and the
+> A→B door never opens. Set the curve and the discount rate as **one** decision, not two.
+
 ---
 
-## 3. Post-deploy wiring (BFF chain-adapter — next phase, no key needed to build)
+## 3. Per-agent wiring — attaching the A→B crossing
 
-Once `deployments/baseSepolia.json` exists, the BFF gains a chain-mode market adapter that mirrors
-the current `marketService` interface (`state/buy/sell/convert`) but reads/writes the real curve/AMM
-via ethers, and the web app moves buys to a **browser-wallet signing flow** (approve USDC → `curve.buy`),
-same pattern as the DobProtocol Stellar flow. This can be built and tested against a **local hardhat
-node** before the testnet key exists — flip a `MARKET_MODE=chain` flag when addresses are live.
+`launch()` gives an agent its A market. The crossing is a **second, later** step, because the
+controller takes the participation token as an immutable and that token does not exist until the
+agent's DobProtocol pool has been created and funded.
 
-Build order to go live on-chain:
-1. ✅ Contracts complete + tested (41+11 green).
-2. ⛔ Deploy to Base Sepolia — **needs funded deployer key (owner)**. ← the only blocker.
-3. BFF chain-adapter behind `MARKET_MODE` flag (buildable now vs a local node).
-4. Web signing flow for buy/sell/convert (approve + tx, wallet-signed).
-5. Revenue router split (b%/d%, bounded 10–50%) wiring the buyback + DobProtocol distribution.
+Order of operations for one agent:
+
+1. **`launchpad.launch(params)`** → `agentId`, A token, curve. The A market is live and
+   permissionless from this moment.
+2. **Create the DobProtocol pool** with `payment_token = A`, `payoutMode = 0` (Escrow → splitter),
+   the agent's `estimated_apr` as the discount rate, and `participation_to_sale` = 100% − the
+   creator's retained share. The pool issues B.
+3. **`launchpad.deployController(agentId, ControllerParams)`** — owner-only. Deploys the
+   controller and binds it to the curve. Binding is **one-shot**: there is no path to swap in a
+   second controller later, so get the params right.
+   ```
+   participationToken = <B, from step 2>
+   capexSink          = <where released DOBX funds the real-world asset>
+   retainedBps        = <creator's share of B, in bps; must be < 10000>
+   graceSeconds       = <conversion stays closed this long — the attention-market window>
+   cliffSeconds       = <retained B: nothing vests before this>
+   vestSeconds        = <retained B: linear over this window after the cliff>
+   ```
+4. **Transfer the pool's B to the controller**, then call **`controller.activate()`** —
+   permissionless, and the only moment the cap table is snapshotted. It fixes
+   `convertibleB = totalB × (1 − retainedBps)`, `aSupplyAtActivation`, and starts the grace clock.
+   Send **all** of the agent's B before activating: B that arrives afterwards is not distributable
+   and, because the controller is ownerless, is stuck there permanently.
+5. **Approve converters in the `KycRegistry`** (attestor or owner) as they clear compliance.
+   Trading A needs nothing; only crossing into B is gated.
+
+After activation every A converts at the same ratio, `convertibleB / aSupplyAtActivation` — so
+with 30% retained, 1 A → 0.7 B for the first converter and the last alike.
+
+---
+
+## 4. What is still open
+
+1. ✅ Contracts complete + tested (42 green).
+2. ⛔ Deploy to Base Sepolia — **needs funded deployer key (owner)**.
+3. BFF chain-adapter behind `MARKET_MODE` (buildable now against a local hardhat node).
+4. Web signing flow: approve A → `controller.convert`, wallet-signed, single step.
+5. TOKENOMICS-V2 §4.2 — released reserve is DOBX while capex is fiat. Converting it to fund an
+   asset means selling DOBX, which opposes the sink. Unresolved; do not deploy real capex flow
+   until it is.
+6. Foundry fuzz/invariant suite: curve solvency **across conversions**, k-monotonicity, the
+   post-graduation LP-shrink price invariant.
