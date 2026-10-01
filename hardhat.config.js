@@ -1,7 +1,7 @@
 require("@nomicfoundation/hardhat-toolbox");
 require("dotenv").config();
 
-const { PRIVATE_KEY, BASE_RPC_URL, BASE_SEPOLIA_RPC_URL, BASESCAN_API_KEY } = process.env;
+const { PRIVATE_KEY, BASE_RPC_URL, BASE_SEPOLIA_RPC_URL, ROBINHOOD_RPC_URL, BASESCAN_API_KEY } = process.env;
 const accounts = PRIVATE_KEY ? [PRIVATE_KEY] : [];
 
 /** @type import('hardhat/config').HardhatUserConfig */
@@ -21,6 +21,12 @@ module.exports = {
     baseSepolia: {
       url: BASE_SEPOLIA_RPC_URL || "https://sepolia.base.org",
       chainId: 84532,
+      accounts,
+    },
+    // Robinhood Chain mainnet (Arbitrum Orbit). DobProtocol issues B here too, so A and B can share it.
+    robinhood: {
+      url: ROBINHOOD_RPC_URL || "https://rpc.mainnet.chain.robinhood.com",
+      chainId: 4663,
       accounts,
     },
   },
