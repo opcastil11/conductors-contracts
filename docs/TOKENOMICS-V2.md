@@ -9,6 +9,14 @@
 > **✅ verificado** = confirmado leyendo código, con referencia · **▶ decidido** = decisión
 > tomada, sin construir todavía · **❓ abierto** = falta decidir.
 >
+> **Actualización 30-09-2026 — B es un pool abierto, no un crédito.** Decisión de producto: B deja
+> de modelarse como factoring (monto pedido, tasa de descuento, plazo, amortización hasta cero).
+> B es un pool **free to join** y sin plazo: cuando termina la etapa A se entra **cruzando A**
+> (un solo sentido), lo que ganan los activos del agente se deposita en el pool y se reparte
+> pro-rata, y se sale **vendiendo B** en el marketplace. Sin retorno prometido. Los contratos no
+> cambian: los números de factoring nunca llegaron a la cadena (vivían en el BFF y en
+> `pool_data`). Las secciones §2-B, §3.3, §3.4 y §6 quedan reescritas para este modelo.
+>
 > **Actualización 09-08-2026.** La línea original de este banner decía «nada de este modelo está
 > construido aún». **Ya no es cierta y por eso se retira**: los contratos están desplegados en
 > Base Sepolia y el cruce, la gracia y la graduación están verificados contra cadena viva. Este
@@ -45,7 +53,7 @@ ingreso.**
 | Split del revenue | operador% / buyback% (10–50%) / distribución% | **100% al pool**; todo corte ocurre dentro de la cap table |
 | `operator_split_bps` (dobx BFF) | 30% off-the-top | **se elimina** |
 | Ganancia del operador | split off-the-top + tesorería | **`participation_to_sale` retenido**, custodiado por el controller |
-| Piso de A | arbitraje indirecto vía dos mercados | **`P_A ≥ P_B` mecánico**, con término de FX y decreciente con la amortización |
+| Piso de A | arbitraje indirecto vía dos mercados | **`P_A ≥ P_B` mecánico**, con término de FX; `P_B` es precio de mercado |
 | Financiamiento del capex | sin definir (conflicto con la reserva de la curva) | **liberación de reserva al quemar A** — ❓ con una arista abierta (§4.2) |
 | Estatus legal de A | "A no está soldado a B" | **gate de KYC en el cruce A→B, dentro de DobProtocol** |
 
@@ -68,8 +76,9 @@ el token `DOBX`.
     └───────────┘                                            ▼
           ▲                                        ┌──────────────────┐
           │ vender en el AMM (única salida de A)   │     TOKEN B      │
-          ▼                                        │ pool future rev. │
-        DOBX                                       │ finito, amortiza │
+          ▼                                        │   pool abierto   │
+        DOBX                                       │ sin plazo; sales │
+                                                   │  vendiendo B     │
                                                    └──────────────────┘
                                                         │         │
    x402 (DOBI) ──── 100% del ingreso ───────────────────┘         │
@@ -109,26 +118,22 @@ además es el mecanismo de financiamiento.
 > **Consecuencia:** los agentes ya lanzados quedan atados a MockUSDC para siempre — MSOL
 > incluido. Migrar a DOBX significa **relanzar**, no reconfigurar.
 
-### B — participación de un pool de future revenue de DobProtocol
+### B — participación en un pool abierto de DobProtocol
 
-**✅ verificado — qué es exactamente un pool de DobProtocol** (`Dober-MVP/back-end/services/poolUtils.service.js:341`):
+B es la participación en el pool del agente. **No es un crédito**: no hay monto pedido, tasa de
+descuento ni plazo, y el pool no se cierra cuando «termina de pagar» — paga mientras el agente
+opere y gane.
 
-```js
-total_sale_pool_asked   = (participation_to_sale / minimun_percentage_recived) * minimun_purchase_amount
-total_produccion        = total_sale_pool_asked / (1 - estimated_apr/100)   // estimated_apr ES LA TASA DE DESCUENTO
-remaining_to_distribute = total_produccion - total_distributed
-```
-
-O sea: **factoring de flujos futuros.** El creador vende un monto total definido de producción
-futura, a descuento, repartido en un calendario (`distribution_dates`). `real_apr = TPR / años`.
-Cuando `total_distributed` alcanza `total_produccion`, el pool se cierra y B queda en cero.
-
-**No es equity perpetuo. Es un instrumento finito que amortiza.** Todo lo demás en este
-documento se deriva de eso.
-
+- **Entrada:** solo cruzando A, cuando termina la etapa A y vence la gracia. El pool no emite B
+  a la venta.
+- **Ingreso:** lo que ganan los activos (x402) se deposita en el pool y se reparte pro-rata.
+  Cobro pull-based: el tenedor **reclama**, nadie le transfiere.
+- **Salida:** vender B en el marketplace secundario (liquida en USDC).
 - Supply fijo, cap table por porcentajes (`submitInit({ participants: [{address, percentage}] })`).
-- Se paga pull-based: el tenedor **reclama**, nadie le transfiere.
-- Duración: **la define el creador. Se recomienda 10–30 años.** ▶
+
+El pool de DobProtocol trae campos de crédito (`estimated_apr`, `total_sale_pool_asked`,
+`distribution_dates`/`duration`; ver `Dober-MVP/back-end/services/poolUtils.service.js:341`).
+Conductors no los usa: en Base no llegan a la cadena y en la ruta Stellar se mandan en 0 / vacíos.
 
 ---
 
@@ -205,9 +210,9 @@ P_A ≥ P_B          →          A = B + prima especulativa
 
 - **A tiene piso.** El mercado de renta le pone un suelo al mercado especulativo.
 - **A puede cotizar arriba sin límite.** La prima es la especulación, y no se arbitra.
-- **El piso decae.** Como `remaining_to_distribute` solo baja, `P_B` amortiza hacia cero y el
-  piso de A se derrite con él. A 30 años el decaimiento es de ~3% anual: lento, pero monótono y
-  hay que declararlo.
+- **El piso es de mercado.** `P_B` es lo que el marketplace paga por B, que sigue a lo que el
+  agente gana. No hay una cifra «adeudada» que lo fije ni lo haga decaer; Conductors muestra el
+  ratio de cruce, no un piso calculado.
 
 **Con DOBX como quote, el piso lleva un término de tipo de cambio.** A cotiza en DOBX y B
 distribuye en USDC, y la conversión es 1:1 en **unidades**, no en valor:
@@ -223,24 +228,14 @@ P_A(DOBX) × DOBX/USDC  ≥  P_B(USDC)
 **Y el arbitraje solo lo ejecuta quien pasa el KYC** (§7.1). Para el resto del mercado, A flota
 sin piso. Es el precio de resolver lo legal en el cruce, y está asumido.
 
-### 3.4 Condición de racionalidad — la restricción dura
+### 3.4 Convertir tiene que convenir
 
-Convertir entrega algo que vale `P_A` a cambio de algo que vale `P_B`. Solo es racional si:
-
-```
-total_produccion_del_pool / total_shares   ≥   P_A
-```
-
-El lado izquierdo es fijo. **`P_A` sube a lo largo de la curva.** Consecuencia:
-
-- Quien compró A abajo convierte con ganancia.
-- Quien compró A arriba puede quedar **estructuralmente excluido**: convertir le realiza una
-  pérdida, así que no convierte nunca.
-
-▶ **Por lo tanto el precio terminal de la curva tiene que quedar por debajo de la producción
-futura por acción.** Hoy `TERMINAL_PRICE = 0.25` (`dobx-pro/apps/api/src/services/market.service.js:15`)
-es un número puesto a mano, no calibrado contra ningún pool. **La tasa de descuento del pool
-(`estimated_apr`) y la pendiente de la curva son la misma decisión y hay que tomarlas juntas.**
+Cruzar entrega algo que vale `P_A` por algo que vale `ratio × P_B`. Quien compró A arriba de la
+curva puede quedar sin incentivo a cruzar mientras B no cotice por encima. El precio terminal de
+la curva es el dial del creador que fija ese techo (`agents.terminal_price`, default 0,25 DOBX).
+Como B ya no promete una producción total, **no hay comprobación a priori**: la decide el mercado
+de B. (La versión anterior de esta sección ataba el precio terminal a `total_produccion / shares`;
+ese término ya no existe.)
 
 ---
 
@@ -347,19 +342,17 @@ marketplace secundario antes que los inversionistas.
 
 ---
 
-## 6. Los cinco parámetros del creador
+## 6. Los parámetros del creador
 
-El diseño no fija valores: define **un espacio que el creador navega**. Distintos creadores van a
-querer perfiles distintos — unos potenciando el token especulativo, otros el de renta. El
-producto de dobx es exponer ese espacio con sus consecuencias visibles.
+El diseño no fija valores: define **un espacio que el creador navega**. Todos están en el wizard
+de dobx-pro (paso «Fase A → B»). No hay monto, tasa ni plazo: B es un pool abierto.
 
-| # | Parámetro | Dónde vive | Estado hoy |
-|---|---|---|---|
-| 1 | Duración del pool (10–30 años) | `distribution_dates` (DobProtocol) | no expuesto |
-| 2 | **Gracia antes de la 1ª distribución** | calendario (DobProtocol) | no expuesto |
-| 3 | `participation_to_sale` — % retenido | `pool_data` (DobProtocol) | no expuesto |
-| 4 | `estimated_apr` — tasa de descuento | `pool_data` (DobProtocol) | no expuesto |
-| 5 | Precio terminal de la curva | `dobx-contracts` / `market.service.js:15` | hardcodeado |
+| # | Parámetro | Dónde vive |
+|---|---|---|
+| 1 | Precio terminal de la curva | slope de `AgentBondingCurve` |
+| 2 | **Gracia antes de abrir el cruce** | `AgentController.graceEndsAt` |
+| 3 | % de B retenido por el creador | `AgentController` (`retainedBps`) |
+| 4 | Cliff / vesting del retenido | `AgentController` |
 
 ### 6.1 El período de gracia — el separador de fases
 
@@ -371,33 +364,26 @@ Es la pieza que hace que los dos productos no se canibalicen:
   por naturaleza.
 - **Al terminar la gracia:** convertir pasa a ser racional y A empieza a secarse hacia B.
 
-El piso `P_A ≥ P_B` **existe desde el día uno** aunque nadie pueda cobrar todavía: solo queda
-descontado por el plazo de la gracia.
+El piso `P_A ≥ ratio × P_B` **existe desde el día uno** aunque nadie pueda cobrar todavía.
 
 ### 6.2 Los acoplamientos (esto es lo que el wizard tiene que mostrar)
 
-- **Descuento (#4) ↔ precio terminal de la curva (#5).** Ligados por la condición de §3.4. Si la
-  curva termina por encima de la producción por acción, el último tramo de compradores de A queda
-  fuera de la conversión para siempre. **No se pueden calibrar por separado.**
+- **Precio terminal (#1) ↔ incentivo a cruzar.** Un terminal alto deja a los últimos compradores
+  de A sin razón para cruzar mientras B no cotice arriba (§3.4).
 - **Gracia (#2) ↔ retención (#3).** Más gracia = más protagonismo de A = el creador puede
   permitirse retener menos de B. Y al revés.
 - **Retención (#3) ↔ piso de A.** Cada punto retenido baja el piso proporcionalmente: con 30%
   retenido, el piso de A es el 70% del que sería. **La retención del creador y la fuerza del
   vínculo entre los dos mercados son la misma perilla vista desde dos lados.**
-- **Duración (#1) ↔ velocidad del secado.** A 30 años la amortización es ~3% anual: convertir un
-  año más tarde casi no cuesta, así que la urgencia por convertir la tiene que dar la gracia
-  (#2), no el decaimiento.
 
 ### 6.3 Presets
 
-▶ Dos o tres perfiles con los números moviéndose en vivo, en vez de cinco campos numéricos en
-blanco:
+▶ Perfiles de referencia (el wizard hoy expone los diales sueltos, con validaciones):
 
 | | **Perfil atención** | **Perfil renta** | **Balanceado** |
 |---|---|---|---|
 | Gracia | larga (18–24m) | corta (0–6m) | 12m |
 | Retención | alta | baja | media |
-| Descuento | bajo | profundo | medio |
 | Curva | terminal alto | terminal bajo | medio |
 | Resultado | A protagonista, B tardío y chico | B protagonista, A se seca rápido | migración gradual |
 
@@ -441,7 +427,7 @@ Consecuencias, no objeciones: cada una nace de una de las resoluciones de arriba
 | 2 | **El piso de A queda expuesto al FX de DOBX**; su volatilidad se propaga a todos los agentes. | §3.3 | ❓ decidir |
 | 3 | **Inmutabilidad del `AgentController`**: si es actualizable sin timelock, reabre todo lo que cierra. | §3.2 | ❓ decidir |
 | 4 | **Emisión y distribución de DOBX**: supply, quién lo tiene al arrancar, cómo llega el comprador que solo tiene USDC. | §2 | ❓ decidir |
-| 5 | **Calibración numérica descuento ↔ curva** para un agente real. Sin esto §3.4 es teoría. | §3.4 | ❓ decidir |
+| 5 | **Calibración del precio terminal** contra lo que B cotice en un agente real (§3.4). | §3.4 | ❓ decidir |
 | 6 | **El arbitraje solo existe para quien pasa el KYC.** | §3.3 | asumido |
 | 7 | Atestación del ingreso (`OperatorStake` ya construido, la atestación misma no). | — | heredado de `TOKENOMICS.md` §6 |
 | 8 | **Granularidad de B.** El `ParticipationToken` de DobProtocol tiene `decimals() == 0` y el límite de shares es 10 000 000. Si el pool se crea con porcentajes 1–100, toda conversión normal revierte con `"dust"`. | PUENTE §3.3 | ❓ decidir antes de cablear |
@@ -493,7 +479,7 @@ Consecuencias, no objeciones: cada una nace de una de las resoluciones de arriba
 1. **Un solo camino de entrada:** DOBX → A (curva/AMM), modelo Virtuals. A es perpetuo,
    especulativo y su mercado es permissionless.
 2. **Una conversión one-way 1:1 con mismo cap** hacia B, que es la participación de un pool de
-   future revenue de DobProtocol — finito, amortizante, con calendario y descuento.
+   DobProtocol — **abierto**: sin monto, tasa ni plazo; se sale vendiendo B.
 3. **El A convertido se inmoviliza** (crowdfunding con `payment_token = A` y `payoutMode = 0`),
    y esa quema es lo que libera reserva de la curva hacia el capex del activo.
 4. **El `AgentController` es el admin del pool**, no una wallet: eso convierte "inmovilizado" en
