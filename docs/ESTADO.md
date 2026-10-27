@@ -87,7 +87,7 @@ haya cambiado a `true`. Medido: **0,109 % de drift** entre el precio terminal de
 |---|---|---|
 | KYC leído de DobProtocol | `services/dob.client.js#getKycStatus`, `routes/auth.routes.js` `GET /kyc/status`, `POST /kyc/sync` | ✅ vivo (401 sin JWT, verificado en prod) |
 | Espejo on-chain del KYC | `services/evm-launch.client.js#setKycApproved` → `KycRegistry.setApproved` | ✅ vivo |
-| Faucet acotado | `FAUCET_MAX=500`, ventana 24 h `2000`, cooldown 60 s; tabla `faucet_grants` | ✅ vivo (429 verificado en prod) |
+| Faucet acotado | tope por pedido, por ventana de 24 h y cooldown por wallet | ✅ vivo (429 verificado en prod) |
 | 400 en direcciones malformadas | `lib/evm-address.js` (`evmAddress` / `looksEvm` / `maybeEvmAddress`) | ✅ vivo — antes eran 500 desde dentro de ethers |
 | Vesting del B retenido | `GET /agents/:id/vesting`, `POST /agents/:id/vesting/release/prepare`, `components/VestingCard.tsx` | ✅ vivo |
 

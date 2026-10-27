@@ -40,13 +40,13 @@ Si esta llave se pierde: alguien puede aprobarse a sí mismo para cruzar A→B. 
 compliance del cruce (§7.1 de TOKENOMICS-V2), no el dinero — el converter sigue quemando su A.
 
 ### 1.4 Firmante gestionado del BFF (`EVM_PRIVATE_KEY`)
-`dobx-pro/apps/api/src/services/signer.service.js`, usado por `evm-launch.client.js`. Firma:
+Vive en el backend de dobx.pro (repo privado). Firma:
 lanzamientos de agentes, `deployController`, la escritura del espejo de KYC, y las transferencias
 del faucet. **Vive en un servidor**, o sea que es la llave con mayor superficie de ataque y la
 única que un bug de la API puede hacer firmar.
 
-Es también la razón por la que el faucet está acotado: `FAUCET_MAX=500` por pedido, `2000` por
-ventana de 24 h, cooldown de 60 s por wallet. Sin eso, un `for` vacía la tesorería con la firma
+Es también la razón por la que el faucet está acotado por pedido, por ventana de 24 h y con
+cooldown por wallet. Sin eso, un `for` vacía la tesorería con la firma
 de esta llave y sin explotar nada.
 
 ### 1.5 Roles por agente: `creator` y `capexSink`
@@ -122,11 +122,4 @@ El `owner` conserva `setApproved` como fallback, a propósito: si DobProtocol pi
 cruce no se cae.
 
 ### 4.4 Si el faucet se está vaciando
-Los límites viven en la config del BFF, no en la cadena: `FAUCET_MAX`, `FAUCET_WINDOW_MS`,
-`FAUCET_WINDOW_MAX`, `FAUCET_COOLDOWN_MS`. La tabla `faucet_grants` tiene el registro por wallet.
-Bajarlos es un reinicio del proceso, no un redeploy de contratos.
-
-### 4.5 Producción
-La VM `dob-platform` está **compartida con ~22 sitios nginx**. Sólo se toca `/opt/dobx-pro/`:
-web en `/opt/dobx-pro/web`, API en `/opt/dobx-pro/api/src` (cwd `/opt/dobx-pro/api`), pm2 id 12
-`dobx-api`. Backup-then-swap, nunca escritura in-place.
+Los límites viven en la config del BFF, no en la cadena. Bajarlos es un reinicio del proceso, no un redeploy de contratos.
