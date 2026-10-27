@@ -16,8 +16,8 @@ import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
  *
  * Deliberately minimal (no mint after launch, no owner, no upgrade) so the supply is fixed and
  * trust-minimized. `burn` is the ONE supply-side operation, and it only ever reduces supply: the
- * curve burns the A it receives from a conversion, which is what makes "el A convertido queda
- * inmovilizado" a verifiable fact rather than a promise.
+ * curve burns the A it receives from a conversion, which is what makes "converted A is
+ * permanently retired" a verifiable fact rather than a promise.
  */
 contract AgentShareToken is ERC20 {
     uint8 private immutable _decimals;

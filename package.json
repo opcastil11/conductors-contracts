@@ -1,13 +1,19 @@
 {
   "name": "dobx-contracts",
   "version": "0.1.0",
-  "description": "dobx.pro smart contracts — per-agent fair launch (bonding curve → AMM graduation)",
+  "description": "dobx.pro smart contracts — per-agent fair launch (bonding curve → AMM graduation) and one-way conversion into real-world-asset revenue pools",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/opcastil11/conductos-contracts.git"
+  },
   "license": "MIT",
   "scripts": {
     "compile": "hardhat compile",
     "test": "hardhat test",
     "deploy:baseSepolia": "hardhat run scripts/deploy.js --network baseSepolia",
-    "deploy:base": "hardhat run scripts/deploy.js --network base"
+    "deploy:base": "hardhat run scripts/deploy.js --network base",
+    "deploy:arbitrumSepolia": "hardhat run scripts/deploy.js --network arbitrumSepolia",
+    "deploy:arbitrum": "hardhat run scripts/deploy.js --network arbitrumOne"
   },
   "devDependencies": {
     "@nomicfoundation/hardhat-toolbox": "^5.0.0",

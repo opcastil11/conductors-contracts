@@ -1,501 +1,502 @@
-# Tokenomics v2 — modelo one-way A→B sobre pools de *future revenue*
+# Tokenomics v2 — one-way A→B model over *future revenue* pools
 
-> **Estado: VIGENTE. 08-08-2026.** Reemplaza a [`TOKENOMICS.md`](TOKENOMICS.md) (firmado
-> 2026-07-05), que queda como registro histórico del modelo con buyback/converter/tesorería.
-> Este documento es la derivación completa; la versión navegable y con estado de construcción
-> por pieza vive en `dobx.pro/arquitectura` (`dobx-pro/apps/web/src/pages/ArchitecturePage.tsx`).
+> **Status: CURRENT. 2026-08-08.** Supersedes [`TOKENOMICS.md`](TOKENOMICS.md) (signed
+> 2026-07-05), which remains as the historical record of the buyback/converter/treasury model.
+> This document is the full derivation; the browsable version, with per-component build status,
+> lives at `dobx.pro/arquitectura` (`dobx-pro/apps/web/src/pages/ArchitecturePage.tsx`, in the private dobx-pro repo).
 >
-> Notación:
-> **✅ verificado** = confirmado leyendo código, con referencia · **▶ decidido** = decisión
-> tomada, sin construir todavía · **❓ abierto** = falta decidir.
+> Notation:
+> **✅ verified** = confirmed by reading the code, with reference · **▶ decided** = decision
+> made, not yet built · **❓ open** = still to be decided.
 >
-> **Actualización 30-09-2026 — B es un pool abierto, no un crédito.** Decisión de producto: B deja
-> de modelarse como factoring (monto pedido, tasa de descuento, plazo, amortización hasta cero).
-> B es un pool **free to join** y sin plazo: cuando termina la etapa A se entra **cruzando A**
-> (un solo sentido), lo que ganan los activos del agente se deposita en el pool y se reparte
-> pro-rata, y se sale **vendiendo B** en el marketplace. Sin retorno prometido. Los contratos no
-> cambian: los números de factoring nunca llegaron a la cadena (vivían en el BFF y en
-> `pool_data`). Las secciones §2-B, §3.3, §3.4 y §6 quedan reescritas para este modelo.
+> **Update 2026-09-30 — B is an open pool, not a loan.** Product decision: B is no longer
+> modeled as factoring (requested amount, discount rate, term, amortization down to zero).
+> B is a **free to join** pool with no term: once stage A ends, you enter **by crossing A**
+> (one direction only), whatever the agent's assets earn is deposited into the pool and
+> distributed pro rata, and you exit **by selling B** on the marketplace. No promised return. The
+> contracts do not change: the factoring numbers never reached the chain (they lived in the BFF and in
+> `pool_data`). Sections §2-B, §3.3, §3.4 and §6 are rewritten for this model.
 >
-> **Actualización 09-08-2026.** La línea original de este banner decía «nada de este modelo está
-> construido aún». **Ya no es cierta y por eso se retira**: los contratos están desplegados en
-> Base Sepolia y el cruce, la gracia y la graduación están verificados contra cadena viva. Este
-> documento sigue siendo la *derivación* — qué debe pasar. Lo que **pasa** vive en
-> [`ESTADO.md`](ESTADO.md), y cuando los dos se contradigan gana ESTADO. Las llaves y sus
-> poderes están en [`OPERACION.md`](OPERACION.md).
+> **Update 2026-08-09.** The original line of this banner said "none of this model is
+> built yet". **That is no longer true, so it is withdrawn**: the contracts are deployed on
+> Base Sepolia, and the crossing, the grace period and graduation are verified against the live chain. This
+> document is still the *derivation* — what must happen. What **does happen** lives in
+> [`STATUS.md`](STATUS.md), and whenever the two contradict each other, STATUS wins. The keys and their
+> powers are in [`OPERATIONS.md`](OPERATIONS.md).
 >
-> Dos correcciones de fondo, ambas derivadas de leer el código desplegado de DobProtocol:
-> **(a)** el «puente» A↔B no existe como problema — DobProtocol ya emite participaciones en Base
-> mainnet, ver [`dobx-pro/docs/PUENTE.md`](../../dobx-pro/docs/PUENTE.md); **(b)** el admin del
-> pool **no puede** ser el `AgentController` (§3.2 quedó corregido más abajo).
+> Two substantive corrections, both derived from reading DobProtocol's deployed code:
+> **(a)** the A↔B "bridge" does not exist as a problem — DobProtocol already issues participations on Base
+> mainnet, see `dobx-pro/docs/PUENTE.md` (private dobx-pro repo); **(b)** the pool admin
+> **cannot** be the `AgentController` (§3.2 is corrected below).
 
 ---
 
-## 0. Qué cambia respecto al modelo firmado
+## 0. What changes relative to the signed model
 
-El modelo firmado tenía dos productos que se vendían por separado, se conectaban con un flujo
-"vendé A por USDC, comprá B en el marketplace" (§5 de `TOKENOMICS.md`), y se sostenían con un
-buyback financiado por el revenue. Este modelo lo reemplaza por **un solo camino de entrada (A),
-una conversión one-way A→B, y el pool de future revenue de DobProtocol como único destino del
-ingreso.**
+The signed model had two products sold separately, connected by a
+"sell A for USDC, buy B on the marketplace" flow (§5 of `TOKENOMICS.md`), and sustained by a
+revenue-funded buyback. This model replaces it with **a single entry path (A),
+a one-way A→B conversion, and the DobProtocol future revenue pool as the sole destination of
+revenue.**
 
-| Componente | Modelo firmado | Modelo vigente |
+| Component | Signed model | Current model |
 |---|---|---|
-| Quote token de la curva | USDC | **DOBX** — token de plataforma, modelo Virtuals |
-| Mercado de A | curva → AMM | **igual**, pero el par es A/DOBX |
-| Mercado de B | marketplace DobProtocol, precio propio en USDC | **primaria: solo con A**; salida: exit liquidity / marketplace en USDC |
-| Puente A→B | vender A por USDC, comprar B (2 pasos, no atómico, fee 0,5–1%) | **conversión one-way 1:1, mismo cap, con quema de A** |
-| Admin del pool | wallet del operador | **`AgentController`** — un contrato, no una wallet |
-| `AgentConverter` | ✅ construido | **se elimina** |
-| `AgentBuyback` + TWAP + keeper | ✅ construido | **se elimina** |
-| `AgentTreasury` (reserva B, backstop) | ✅ construido | **se elimina** |
-| `TokenomicsFactory` | ✅ construido | **se elimina** |
-| Split del revenue | operador% / buyback% (10–50%) / distribución% | **100% al pool**; todo corte ocurre dentro de la cap table |
-| `operator_split_bps` (dobx BFF) | 30% off-the-top | **se elimina** |
-| Ganancia del operador | split off-the-top + tesorería | **`participation_to_sale` retenido**, custodiado por el controller |
-| Piso de A | arbitraje indirecto vía dos mercados | **`P_A ≥ P_B` mecánico**, con término de FX; `P_B` es precio de mercado |
-| Financiamiento del capex | sin definir (conflicto con la reserva de la curva) | **liberación de reserva al quemar A** — ❓ con una arista abierta (§4.2) |
-| Estatus legal de A | "A no está soldado a B" | **gate de KYC en el cruce A→B, dentro de DobProtocol** |
+| Curve quote token | USDC | **DOBX** — platform token, Virtuals model |
+| Market for A | curve → AMM | **same**, but the pair is A/DOBX |
+| Market for B | DobProtocol marketplace, own price in USDC | **primary: only with A**; exit: exit liquidity / marketplace in USDC |
+| A→B bridge | sell A for USDC, buy B (2 steps, not atomic, fee 0.5–1%) | **one-way 1:1 conversion, same cap, burning A** |
+| Pool admin | operator wallet | **`AgentController`** — a contract, not a wallet |
+| `AgentConverter` | ✅ built | **removed** |
+| `AgentBuyback` + TWAP + keeper | ✅ built | **removed** |
+| `AgentTreasury` (B reserve, backstop) | ✅ built | **removed** |
+| `TokenomicsFactory` | ✅ built | **removed** |
+| Revenue split | operator% / buyback% (10–50%) / distribution% | **100% to the pool**; every cut happens inside the cap table |
+| `operator_split_bps` (dobx BFF) | 30% off-the-top | **removed** |
+| Operator profit | off-the-top split + treasury | **retained `participation_to_sale`**, held in custody by the controller |
+| Floor of A | indirect arbitrage across two markets | **mechanical `P_A ≥ P_B`**, with an FX term; `P_B` is a market price |
+| Capex financing | undefined (conflict with the curve reserve) | **reserve release on burning A** — ❓ with one open edge (§4.2) |
+| Legal status of A | "A is not welded to B" | **KYC gate at the A→B crossing, inside DobProtocol** |
 
-Superficie de contratos que desaparece: converter, buyback, tesorería, factory, ejecución TWAP,
-cron de keeper, tope por época, y toda la superficie MEV asociada. Aparece: `AgentController` y
-el token `DOBX`.
+Contract surface that disappears: converter, buyback, treasury, factory, TWAP execution,
+keeper cron, per-epoch cap, and all the associated MEV surface. Added: `AgentController` and
+the `DOBX` token.
 
 ---
 
-## 1. El modelo completo
+## 1. The complete model
 
 ```
         DOBX
-          │  compra en la curva (precio sube $0,05 → terminal)
+          │  buy on the curve (price rises $0.05 → terminal)
           ▼
-    ┌───────────┐   conversión one-way 1:1, mismo cap
+    ┌───────────┐   one-way 1:1 conversion, same cap
     │  TOKEN A  │───────────────────────────────────────────┐
-    │ perpetuo  │   · el A pagado se quema/inmoviliza       │
-    │ especulat.│   · libera su parte de la reserva → capex │
+    │ perpetual │   · the paid-in A is burned/immobilized   │
+    │ speculat. │   · releases its reserve share → capex    │
     └───────────┘                                            ▼
           ▲                                        ┌──────────────────┐
-          │ vender en el AMM (única salida de A)   │     TOKEN B      │
-          ▼                                        │   pool abierto   │
-        DOBX                                       │ sin plazo; sales │
-                                                   │  vendiendo B     │
+          │ sell on the AMM (A's only exit)        │     TOKEN B      │
+          ▼                                        │     open pool    │
+        DOBX                                       │ no term; you exit│
+                                                   │  by selling B    │
                                                    └──────────────────┘
                                                         │         │
-   x402 (DOBI) ──── 100% del ingreso ───────────────────┘         │
-                    aterriza en el pool                            │
+   x402 (DOBI) ──── 100% of revenue ────────────────────┘         │
+                    lands in the pool                              │
                                                                    ▼
-                                              distribución USDC según calendario
-                                              (arranca tras el período de gracia)
+                                              USDC distribution per schedule
+                                              (starts after the grace period)
                                                                    │
                                                                    ▼
-                                              salida: exit liquidity (LPs con USDC)
-                                                      o marketplace secundario
+                                              exit: exit liquidity (LPs with USDC)
+                                                      or secondary marketplace
 ```
 
-Dos mercados con precios distintos, un piso que los conecta, y una migración de uno al otro que
-además es el mecanismo de financiamiento.
+
+Two markets with different prices, a floor connecting them, and a migration from one to the other that
+is also the financing mechanism.
 
 ---
 
-## 2. Los dos productos
+## 2. The two products
 
-### A — token del agente (perpetuo, especulativo)
+### A — agent token (perpetual, speculative)
 
-- ERC-20 de supply fijo, curva de bonding que gradúa a AMM. Ya construido
+- Fixed-supply ERC-20, bonding curve that graduates to an AMM. Already built
   (`AgentShareToken`, `AgentBondingCurve`, `AgentAMM`).
-- **Cotiza contra DOBX, no contra USDC.** ▶ Modelo Virtuals: el token de la plataforma es la
-  moneda de todos los agentes, así que cada lanzamiento y cada compra es un sink de DOBX.
-- No recibe distribuciones. Su vínculo con el ingreso es **el derecho a convertir**.
-- Su mercado es permissionless: el gate de KYC está en el cruce hacia B, no acá (§7.1).
-- Vive en el mercado de la atención: su ventana de valor especulativo es corta por naturaleza, y
-  el diseño la protege con el período de gracia (§6).
+- **Quoted against DOBX, not USDC.** ▶ Virtuals model: the platform token is the
+  currency of every agent, so every launch and every purchase is a DOBX sink.
+- Receives no distributions. Its link to revenue is **the right to convert**.
+- Its market is permissionless: the KYC gate is at the crossing into B, not here (§7.1).
+- It lives in the attention market: its window of speculative value is short by nature, and
+  the design protects it with the grace period (§6).
 
-**✅ verificado — el cambio de quote token no exige reescribir contratos:**
-`AgentLaunchpad.setQuoteToken()` es `onlyOwner` y emite `QuoteTokenUpdated`
-(`AgentLaunchpad.sol:87`). Pero `AgentBondingCurve.quoteToken` es `immutable`
-(`AgentBondingCurve.sol:32`): cada curva fija su quote al desplegarse.
+**✅ verified — changing the quote token does not require rewriting contracts:**
+`AgentLaunchpad.setQuoteToken()` is `onlyOwner` and emits `QuoteTokenUpdated`
+(`AgentLaunchpad.sol:87`). But `AgentBondingCurve.quoteToken` is `immutable`
+(`AgentBondingCurve.sol:32`): each curve fixes its quote at deployment.
 
-> **Consecuencia:** los agentes ya lanzados quedan atados a MockUSDC para siempre — MSOL
-> incluido. Migrar a DOBX significa **relanzar**, no reconfigurar.
+> **Consequence:** agents already launched are tied to MockUSDC forever — MSOL
+> included. Migrating to DOBX means **relaunching**, not reconfiguring.
 
-### B — participación en un pool abierto de DobProtocol
+### B — participation in an open DobProtocol pool
 
-B es la participación en el pool del agente. **No es un crédito**: no hay monto pedido, tasa de
-descuento ni plazo, y el pool no se cierra cuando «termina de pagar» — paga mientras el agente
-opere y gane.
+B is the participation in the agent's pool. **It is not a loan**: there is no requested amount, discount
+rate or term, and the pool does not close when it "finishes paying" — it pays as long as the agent
+operates and earns.
 
-- **Entrada:** solo cruzando A, cuando termina la etapa A y vence la gracia. El pool no emite B
-  a la venta.
-- **Ingreso:** lo que ganan los activos (x402) se deposita en el pool y se reparte pro-rata.
-  Cobro pull-based: el tenedor **reclama**, nadie le transfiere.
-- **Salida:** vender B en el marketplace secundario (liquida en USDC).
-- Supply fijo, cap table por porcentajes (`submitInit({ participants: [{address, percentage}] })`).
+- **Entry:** only by crossing A, once stage A ends and the grace period expires. The pool does not issue B
+  for sale.
+- **Revenue:** whatever the assets earn (x402) is deposited into the pool and distributed pro rata.
+  Pull-based collection: the holder **claims**; nobody transfers to them.
+- **Exit:** sell B on the secondary marketplace (settles in USDC).
+- Fixed supply, percentage-based cap table (`submitInit({ participants: [{address, percentage}] })`).
 
-El pool de DobProtocol trae campos de crédito (`estimated_apr`, `total_sale_pool_asked`,
-`distribution_dates`/`duration`; ver `Dober-MVP/back-end/services/poolUtils.service.js:341`).
-Conductors no los usa: en Base no llegan a la cadena y en la ruta Stellar se mandan en 0 / vacíos.
+The DobProtocol pool comes with loan fields (`estimated_apr`, `total_sale_pool_asked`,
+`distribution_dates`/`duration`; see `Dober-MVP/back-end/services/poolUtils.service.js:341`).
+Conductors does not use them: on Base they do not reach the chain, and on the Stellar route they are sent as 0 / empty.
 
 ---
 
-## 3. La conversión A→B
+## 3. The A→B conversion
 
-### 3.1 Mecánica
+### 3.1 Mechanics
 
-**✅ verificado — DobProtocol acepta un token de pago arbitrario, independiente del token de distribución:**
+**✅ verified — DobProtocol accepts an arbitrary payment token, independent of the distribution token:**
 
-| Vía | Referencia | Qué acepta |
+| Route | Reference | What it accepts |
 |---|---|---|
-| Crowdfunding Stellar | `stellar.service.js:1089` — `init(admin, payment_token, price_per_share, soft_cap, hard_cap, deadline, payout_mode)` | cualquier SAC |
-| Sale EVM | `evm-pool.service.js:322` — `prepareCreateSale({participationToken, paymentToken, price})` | cualquier ERC-20 (`0x0` ⇒ ETH) |
-| Marketplace secundario | `payment_token_address` **por listing** (`stellar-marketplace.service.js`) | lo que elija el vendedor |
-| Exit liquidity | `payment_token_address` **por oferta de LP** (`stellar-exit-liquidity.service.js`) | lo que elija el LP |
+| Stellar crowdfunding | `stellar.service.js:1089` — `init(admin, payment_token, price_per_share, soft_cap, hard_cap, deadline, payout_mode)` | any SAC |
+| EVM sale | `evm-pool.service.js:322` — `prepareCreateSale({participationToken, paymentToken, price})` | any ERC-20 (`0x0` ⇒ ETH) |
+| Secondary marketplace | `payment_token_address` **per listing** (`stellar-marketplace.service.js`) | whatever the seller chooses |
+| Exit liquidity | `payment_token_address` **per LP offer** (`stellar-exit-liquidity.service.js`) | whatever the LP chooses |
 
-Distribución aparte: `prepareDistribute({ tokenAddress })` — va en **USDC**.
+Distribution is separate: `prepareDistribute({ tokenAddress })` — it is paid in **USDC**.
 
-▶ **El diseño:**
-- Campaña de crowdfunding del pool con **`payment_token = A`**, `price_per_share` tal que
-  **1 A = 1 B**, y `total_shares(B) = total_supply(A)` (mismo cap).
-- **`payoutMode = 0` (Escrow)** — ✅ verificado en `stellar.service.js:1099`: modo 0 manda los
-  fondos al **splitter** (el contrato del pool) en `activate()`; modo 1 (`DirectToOwner`) los
-  manda a la **wallet del admin**. Modo 0 es lo que impide que el operador se quede con el A
-  recaudado. Hoy `dobx-pro/apps/api/src/services/tokenize.service.js` no pasa este parámetro.
-- El A que entra al splitter **queda permanentemente inmovilizado**.
+▶ **The design:**
+- Pool crowdfunding campaign with **`payment_token = A`**, `price_per_share` such that
+  **1 A = 1 B**, and `total_shares(B) = total_supply(A)` (same cap).
+- **`payoutMode = 0` (Escrow)** — ✅ verified in `stellar.service.js:1099`: mode 0 sends the
+  funds to the **splitter** (the pool contract) on `activate()`; mode 1 (`DirectToOwner`) sends them
+  to the **admin wallet**. Mode 0 is what prevents the operator from keeping the A
+  raised. Today `dobx-pro/apps/api/src/services/tokenize.service.js` does not pass this parameter.
+- The A that enters the splitter **remains permanently immobilized**.
 
-**Es one-way.** No existe B→A. Quien convirtió, convirtió.
+**It is one-way.** There is no B→A. Whoever converted, converted.
 
-### 3.2 `AgentController` — por qué «quemado» es una garantía y no una promesa
+### 3.2 `AgentController` — why "burned" is a guarantee and not a promise
 
-El escrow deja el A en el splitter, pero eso solo sirve si nadie puede sacarlo de ahí. La
-pregunta abierta era si `soro_splitter` expone un barrido de admin (en el repo solo está el
-`.wasm` compilado, `stellar.service.js:74`).
+The escrow leaves the A in the splitter, but that only helps if nobody can take it out. The
+open question was whether `soro_splitter` exposes an admin sweep (the repo only contains the
+compiled `.wasm`, `stellar.service.js:74`).
 
-▶ **La decisión evita tener que responderla:** el admin del pool **deja de ser una wallet** y
-pasa a ser un contrato, el `AgentController`, que no expone ninguna función para mover esos
-fondos. Si la llamada no existe en el único address que podría hacerla, da igual que el splitter
-la tenga.
+▶ **The decision avoids having to answer it:** the pool admin **stops being a wallet** and
+becomes a contract, the `AgentController`, which exposes no function to move those
+funds. If the call does not exist at the only address that could make it, it does not matter whether the splitter
+has it.
 
-El mismo contrato absorbe la otra regla que hacía falta:
+The same contract absorbs the other rule that was needed:
 
-- **El A convertido queda inmovilizado** — sin superficie de retiro, «inmovilizado» y «quemado»
-  son funcionalmente lo mismo.
-- **El B retenido por el creador vive adentro**, con su cliff y su calendario aplicados por
-  código (§5.3).
+- **Converted A stays immobilized** — with no withdrawal surface, "immobilized" and "burned"
+  are functionally the same.
+- **The B retained by the creator lives inside it**, with its cliff and schedule enforced by
+  code (§5.3).
 
-> ❓ **Abierto y crítico: la garantía vale lo que valga su llave de upgrade.** Un controller
-> actualizable sin timelock reabre todo lo que cierra — quien pueda cambiarlo puede agregarle el
-> barrido después. Tiene que ser **inmutable**, o su llave estar quemada o detrás de un timelock
-> lo bastante largo como para que el mercado reaccione.
+> ❓ **Open and critical: the guarantee is only as good as its upgrade key.** An
+> upgradeable controller without a timelock reopens everything it closes — whoever can change it can add the
+> sweep later. It must be **immutable**, or its key burned or behind a timelock
+> long enough for the market to react.
 
-> ⛔ **Corrección 09-08-2026 — «el admin del pool es el controller» no es implementable.**
-> Contra el `PoolMasterV2` que DobProtocol tiene desplegado en Base, `createTreasuryPool` hace
-> dueño del pool a `users[0]`, y en la lógica v2 (auditoría 2026-08, hallazgo B-1)
-> `createDistribution` es **owner-only**. `AgentController` no tiene passthrough de llamadas, así
-> que ponerlo de dueño dejaría al pool **sin nadie capaz de repartir**.
+> ⛔ **Correction 2026-08-09 — "the pool admin is the controller" is not implementable.**
+> Against the `PoolMasterV2` that DobProtocol has deployed on Base, `createTreasuryPool` makes
+> `users[0]` the pool owner, and in the v2 logic (audit 2026-08, finding B-1)
+> `createDistribution` is **owner-only**. `AgentController` has no call passthrough, so
+> making it the owner would leave the pool **with nobody able to distribute**.
 >
-> La separación correcta: **dueño del pool** = quien opera las distribuciones (una wallet);
-> **`AgentController`** = custodio del B y único emisor de la razón de conversión. Lo que este
-> §3.2 quería garantizar **no se pierde** — sigue siendo cierto que nadie puede sacarle B a un
-> converter, cambiar la razón después de `activate()`, ni mover quote a un destino distinto del
-> `capexSink`. Lo que se cae es la frase «el admin del pool es un contrato, no una wallet».
-> Derivación completa en [`dobx-pro/docs/PUENTE.md`](../../dobx-pro/docs/PUENTE.md) §4.
+> The correct separation: **pool owner** = whoever operates the distributions (a wallet);
+> **`AgentController`** = custodian of B and sole issuer of the conversion ratio. What this
+> §3.2 meant to guarantee **is not lost** — it is still true that nobody can take B away from a
+> converter, change the ratio after `activate()`, or move quote to any destination other than the
+> `capexSink`. What falls is the sentence "the pool admin is a contract, not a wallet".
+> Full derivation in `dobx-pro/docs/PUENTE.md` §4 (private dobx-pro repo).
 
-### 3.3 Relación de precios
+### 3.3 Price relationship
 
-El arbitraje corre en un solo sentido: si `P_B > P_A`, comprás A, convertís, vendés B — eso
-empuja `P_A` hacia arriba. Si `P_B < P_A` no hay nada que hacer. Por lo tanto:
+Arbitrage runs in one direction only: if `P_B > P_A`, you buy A, convert, sell B — that
+pushes `P_A` up. If `P_B < P_A` there is nothing to do. Therefore:
 
 ```
-P_A ≥ P_B          →          A = B + prima especulativa
+P_A ≥ P_B          →          A = B + speculative premium
 ```
 
-- **A tiene piso.** El mercado de renta le pone un suelo al mercado especulativo.
-- **A puede cotizar arriba sin límite.** La prima es la especulación, y no se arbitra.
-- **El piso es de mercado.** `P_B` es lo que el marketplace paga por B, que sigue a lo que el
-  agente gana. No hay una cifra «adeudada» que lo fije ni lo haga decaer; Conductors muestra el
-  ratio de cruce, no un piso calculado.
+- **A has a floor.** The income market puts a floor under the speculative market.
+- **A can trade above it without limit.** The premium is the speculation, and it is not arbitraged.
+- **The floor is market-driven.** `P_B` is what the marketplace pays for B, which tracks what the
+  agent earns. There is no "owed" figure that fixes it or makes it decay; Conductors shows the
+  crossing ratio, not a computed floor.
 
-**Con DOBX como quote, el piso lleva un término de tipo de cambio.** A cotiza en DOBX y B
-distribuye en USDC, y la conversión es 1:1 en **unidades**, no en valor:
+**With DOBX as quote, the floor carries an exchange-rate term.** A is quoted in DOBX and B
+distributes in USDC, and the conversion is 1:1 in **units**, not in value:
 
 ```
 P_A(DOBX) × DOBX/USDC  ≥  P_B(USDC)
 ```
 
-> ❓ Consecuencia a asumir o mitigar: **si DOBX cae, el piso de A medido en DOBX sube.** El suelo
-> sigue existiendo, pero la volatilidad de DOBX se propaga a todos los mercados de agentes a la
-> vez.
+> ❓ Consequence to accept or mitigate: **if DOBX falls, the floor of A measured in DOBX rises.** The floor
+> still exists, but DOBX volatility propagates to all agent markets at
+> once.
 
-**Y el arbitraje solo lo ejecuta quien pasa el KYC** (§7.1). Para el resto del mercado, A flota
-sin piso. Es el precio de resolver lo legal en el cruce, y está asumido.
+**And the arbitrage can only be executed by those who pass KYC** (§7.1). For the rest of the market, A floats
+with no floor. That is the price of resolving the legal question at the crossing, and it is accepted.
 
-### 3.4 Convertir tiene que convenir
+### 3.4 Converting has to pay off
 
-Cruzar entrega algo que vale `P_A` por algo que vale `ratio × P_B`. Quien compró A arriba de la
-curva puede quedar sin incentivo a cruzar mientras B no cotice por encima. El precio terminal de
-la curva es el dial del creador que fija ese techo (`agents.terminal_price`, default 0,25 DOBX).
-Como B ya no promete una producción total, **no hay comprobación a priori**: la decide el mercado
-de B. (La versión anterior de esta sección ataba el precio terminal a `total_produccion / shares`;
-ese término ya no existe.)
+Crossing hands over something worth `P_A` for something worth `ratio × P_B`. Whoever bought A high on the
+curve may have no incentive to cross until B trades above that. The curve's terminal price is
+the creator's dial that sets that ceiling (`agents.terminal_price`, default 0.25 DOBX).
+Since B no longer promises a total production, **there is no a priori check**: the market
+for B decides. (The previous version of this section tied the terminal price to `total_produccion / shares`;
+that term no longer exists.)
 
 ---
 
-## 4. El financiamiento: el capex sale de las conversiones
+## 4. Financing: capex comes from conversions
 
-### 4.1 El argumento
+### 4.1 The argument
 
-**Una bonding curve no es un levantamiento de capital, es un market maker con balance.** Lo que
-entra cuando alguien compra A no es plata recaudada: es la **reserva** con la que la curva le
-paga a quien después venda. Es un pasivo. `AgentBondingCurve` tiene reservas explícitas.
+**A bonding curve is not a capital raise, it is a market maker with a balance sheet.** What
+comes in when someone buys A is not money raised: it is the **reserve** the curve uses to
+pay whoever sells later. It is a liability. `AgentBondingCurve` has explicit reserves.
 
-Si el operador gasta esa reserva en el activo, queda un sistema de reserva fraccionaria que
-funciona solo mientras entre más de lo que sale:
+If the operator spends that reserve on the asset, the result is a fractional-reserve system that
+works only as long as more comes in than goes out:
 
 ```
-curva vende 200k A                        → reserva = 30k DOBX
-operador gasta 25k en el cargador         → reserva = 5k DOBX
-tenedores de 100k A salen                 → necesitan 15k DOBX → la curva quiebra
+curve sells 200k A                        → reserve = 30k DOBX
+operator spends 25k on the charger        → reserve = 5k DOBX
+holders of 100k A exit                    → need 15k DOBX → the curve goes bust
 ```
 
-**La conversión resuelve esto exactamente.** Cada A convertido a B se retira permanentemente del
-lado vendedor de la curva; su parte de la reserva deja de ser un pasivo de recompra. De ahí sale
-la regla:
+**Conversion solves exactly this.** Every A converted to B is permanently removed from the
+sell side of the curve; its share of the reserve stops being a buyback liability. Hence
+the rule:
 
-> ▶ **El capex no se financia con el raise. Se financia con las conversiones.** La reserva queda
-> 100% respaldada para todo el A no convertido. Al quemar un A, la curva libera lo que le habría
-> pagado por recomprarlo, y eso va al activo.
+> ▶ **Capex is not financed with the raise. It is financed with conversions.** The reserve stays
+> 100% backed for all unconverted A. When an A is burned, the curve releases what it would have
+> paid to buy it back, and that goes to the asset.
 
-El incentivo queda alineado solo: **para financiar el activo, el operador tiene que hacer
-atractiva la conversión** — es decir, tiene que hacer que el ingreso sea real. No hay forma de
-sacar el dinero sin que alguien renuncie voluntariamente a su derecho de reventa.
+The incentive aligns itself: **to finance the asset, the operator has to make conversion
+attractive** — that is, has to make the revenue real. There is no way to
+take the money out without someone voluntarily giving up their resale right.
 
-### 4.2 La arista que abre DOBX
+### 4.2 The edge that DOBX opens
 
-❓ **Al mover la curva a DOBX, lo que libera la quema deja de ser USDC.** Convertirlo en un
-activo físico exige **venderlo por USDC** — o sea, presión de venta sobre el propio token de la
-plataforma justo cuando los agentes empiezan a funcionar, que es exactamente cuando no la
-querés. Es la contracara del sink: **DOBX sube al lanzar agentes y baja al financiarlos.**
+❓ **Once the curve moves to DOBX, what the burn releases is no longer USDC.** Turning it into a
+physical asset requires **selling it for USDC** — that is, selling pressure on the platform's own
+token right when the agents start operating, which is exactly when you don't
+want it. It is the flip side of the sink: **DOBX rises when agents launch and falls when they are financed.**
 
-Opciones sobre la mesa, ninguna elegida:
-1. Venta en mercado, asumiendo el impacto.
-2. Un fondo de USDC de la plataforma que compre el DOBX liberado.
-3. Que el capex lo adelante el operador contra su B retenido.
+Options on the table, none chosen:
+1. Market sale, accepting the impact.
+2. A platform USDC fund that buys the released DOBX.
+3. The operator advances the capex against their retained B.
 
-**Es el pendiente más urgente del modelo.**
+**It is the most urgent pending item in the model.**
 
-### 4.3 Criterio de encaje
+### 4.3 Fit criterion
 
-El período de gracia (§6) está diseñado para que **nadie convierta durante el primer año**. Eso
-significa **cero financiamiento de capex en el año 1**.
+The grace period (§6) is designed so that **nobody converts during the first year**. That
+means **zero capex financing in year 1**.
 
-▶ **Por lo tanto este modelo encaja con activos ya financiados**, no con levantamientos para
-capex nuevo. Ese camino ya existe en el código: `tokenize.service.register({ linkedPools })`
-enlaza pools de DobProtocol ya tokenizados que el agente pasa a operar. En ese caso el año de
-gracia es el operador recuperando su capex antes de empezar a repartir — estructura estándar de
-project finance.
-
----
-
-## 5. La cascada de ingresos
-
-### 5.1 Todo el ingreso aterriza en el pool
-
-▶ **`operator_split_bps` se elimina.** Hoy `dobx-pro/apps/api/src/config.js` descuenta 30% del
-gross **antes** de que el dinero llegue al pool. Eso rompe dos cosas:
-
-1. **La auditoría.** Si la address del pool es el punto de auditoría — que es la razón por la que
-   en la práctica opex y ganancia se mezclan ahí — entonces un corte aguas arriba deja el rastro
-   on-chain incompleto.
-2. **El APR publicado.** DobProtocol calcula el retorno con los números del pool
-   (`poolUtils.service.js:341`), que no saben del descuento previo. El pool promete una
-   producción total que nunca va a llegar completa.
-
-> **Regla: el 100% del ingreso x402 aterriza en la address del pool. Todos los cortes ocurren
-> dentro de la cap table.**
-
-### 5.2 La ganancia del operador vive en `participation_to_sale`
-
-**✅ verificado:** `pool_data.participation_to_sale` es literalmente "percentage of pool for
-sale" y `calculatedApr` ya lo usa (`poolUtils.service.js:344`). No es una feature nueva — es un
-campo que dobx hoy no expone: `tokenize.service.completeInit` mete
-`participants: [{ operator, 100 }]` y nunca setea `participation_to_sale`.
-
-▶ **En el wizard de tokenización se le pregunta al creador qué % del future revenue retiene.**
-Ese % cubre su opex y su ganancia, mezclados.
-
-**Consecuencia que hay que declarar:** el operador absorbe la volatilidad del opex, no los
-inversionistas. Es una estructura de arriendo bruto. Es defendible y más simple, pero exige
-declararlo explícitamente ("el operador corre con el opex").
-
-❓ El piso de retención realista por tipo de activo (cargador / solar / vending) **se difiere**:
-no es un problema hoy y se calibra con datos de operación reales en vez de adivinarlo ahora. El
-riesgo a vigilar es que si el opex se come la retención de forma persistente, el operador
-abandona el activo y el pool muere.
-
-### 5.3 Lockup del B retenido
-
-▶ **Resuelto por el `AgentController` (§3.2).** El B retenido lo custodia el controller, que
-aplica el cliff y el calendario por código, así que el creador no puede listarlo en el
-marketplace secundario antes que los inversionistas.
-
-(Exit liquidity **no** era el vector: ahí el LP deposita USDC y *compra* shares con
-`discount_bps` — `stellar-exit-liquidity.service.js:71`; el que sale es quien paga el descuento.)
+▶ **Therefore this model fits already-financed assets**, not raises for
+new capex. That path already exists in the code: `tokenize.service.register({ linkedPools })`
+links already-tokenized DobProtocol pools that the agent takes over operating. In that case the grace
+year is the operator recovering their capex before starting to distribute — a standard
+project finance structure.
 
 ---
 
-## 6. Los parámetros del creador
+## 5. The revenue waterfall
 
-El diseño no fija valores: define **un espacio que el creador navega**. Todos están en el wizard
-de dobx-pro (paso «Fase A → B»). No hay monto, tasa ni plazo: B es un pool abierto.
+### 5.1 All revenue lands in the pool
 
-| # | Parámetro | Dónde vive |
+▶ **`operator_split_bps` is removed.** Today `dobx-pro/apps/api/src/config.js` deducts 30% of the
+gross **before** the money reaches the pool. That breaks two things:
+
+1. **The audit.** If the pool address is the audit point — which is the reason why
+   in practice opex and profit get mixed there — then an upstream cut leaves the
+   on-chain trail incomplete.
+2. **The published APR.** DobProtocol computes the return from the pool's numbers
+   (`poolUtils.service.js:341`), which know nothing about the prior deduction. The pool promises a
+   total production that will never arrive in full.
+
+> **Rule: 100% of x402 revenue lands at the pool address. All cuts happen
+> inside the cap table.**
+
+### 5.2 The operator's profit lives in `participation_to_sale`
+
+**✅ verified:** `pool_data.participation_to_sale` is literally "percentage of pool for
+sale" and `calculatedApr` already uses it (`poolUtils.service.js:344`). It is not a new feature — it is a
+field that dobx does not expose today: `tokenize.service.completeInit` puts in
+`participants: [{ operator, 100 }]` and never sets `participation_to_sale`.
+
+▶ **The tokenization wizard asks the creator what % of future revenue they retain.**
+That % covers their opex and their profit, mixed together.
+
+**Consequence that must be disclosed:** the operator absorbs opex volatility, not the
+investors. It is a gross-lease structure. It is defensible and simpler, but it requires
+stating it explicitly ("the operator bears the opex").
+
+❓ The realistic retention floor per asset type (charger / solar / vending) **is deferred**:
+it is not a problem today, and it will be calibrated with real operating data instead of guessed now. The
+risk to watch is that if opex persistently eats the retention, the operator
+abandons the asset and the pool dies.
+
+### 5.3 Lockup of retained B
+
+▶ **Solved by the `AgentController` (§3.2).** Retained B is held in custody by the controller, which
+enforces the cliff and the schedule in code, so the creator cannot list it on the
+secondary marketplace before the investors.
+
+(Exit liquidity was **not** the vector: there the LP deposits USDC and *buys* shares with
+`discount_bps` — `stellar-exit-liquidity.service.js:71`; the one exiting is the one who pays the discount.)
+
+---
+
+## 6. The creator's parameters
+
+The design does not fix values: it defines **a space the creator navigates**. All of them are in the
+dobx-pro wizard ("Fase A → B" step). There is no amount, rate or term: B is an open pool.
+
+| # | Parameter | Where it lives |
 |---|---|---|
-| 1 | Precio terminal de la curva | slope de `AgentBondingCurve` |
-| 2 | **Gracia antes de abrir el cruce** | `AgentController.graceEndsAt` |
-| 3 | % de B retenido por el creador | `AgentController` (`retainedBps`) |
-| 4 | Cliff / vesting del retenido | `AgentController` |
+| 1 | Curve terminal price | `AgentBondingCurve` slope |
+| 2 | **Grace period before opening the crossing** | `AgentController.graceEndsAt` |
+| 3 | % of B retained by the creator | `AgentController` (`retainedBps`) |
+| 4 | Cliff / vesting of the retained portion | `AgentController` |
 
-### 6.1 El período de gracia — el separador de fases
+### 6.1 The grace period — the phase separator
 
-Es la pieza que hace que los dos productos no se canibalicen:
+It is the piece that keeps the two products from cannibalizing each other:
 
-- **Durante la gracia (p. ej. 12 meses):** B no paga nada. Convertir significa entregar un token
-  líquido por un papel que todavía no rinde → **nadie convierte**. A conserva su float completo y
-  tiene la ventana entera del mercado de atención, que es donde vive su valor y que decae rápido
-  por naturaleza.
-- **Al terminar la gracia:** convertir pasa a ser racional y A empieza a secarse hacia B.
+- **During the grace period (e.g. 12 months):** B pays nothing. Converting means handing over a liquid
+  token for paper that does not yield yet → **nobody converts**. A keeps its full float and
+  has the entire window of the attention market, which is where its value lives and which decays quickly
+  by nature.
+- **When the grace period ends:** converting becomes rational and A starts draining into B.
 
-El piso `P_A ≥ ratio × P_B` **existe desde el día uno** aunque nadie pueda cobrar todavía.
+The floor `P_A ≥ ratio × P_B` **exists from day one** even though nobody can collect yet.
 
-### 6.2 Los acoplamientos (esto es lo que el wizard tiene que mostrar)
+### 6.2 The couplings (this is what the wizard has to show)
 
-- **Precio terminal (#1) ↔ incentivo a cruzar.** Un terminal alto deja a los últimos compradores
-  de A sin razón para cruzar mientras B no cotice arriba (§3.4).
-- **Gracia (#2) ↔ retención (#3).** Más gracia = más protagonismo de A = el creador puede
-  permitirse retener menos de B. Y al revés.
-- **Retención (#3) ↔ piso de A.** Cada punto retenido baja el piso proporcionalmente: con 30%
-  retenido, el piso de A es el 70% del que sería. **La retención del creador y la fuerza del
-  vínculo entre los dos mercados son la misma perilla vista desde dos lados.**
+- **Terminal price (#1) ↔ incentive to cross.** A high terminal leaves the last buyers
+  of A with no reason to cross until B trades above it (§3.4).
+- **Grace period (#2) ↔ retention (#3).** More grace = more prominence for A = the creator can
+  afford to retain less of B. And vice versa.
+- **Retention (#3) ↔ floor of A.** Each retained point lowers the floor proportionally: with 30%
+  retained, the floor of A is 70% of what it would otherwise be. **The creator's retention and the strength of the
+  link between the two markets are the same knob seen from two sides.**
 
 ### 6.3 Presets
 
-▶ Perfiles de referencia (el wizard hoy expone los diales sueltos, con validaciones):
+▶ Reference profiles (the wizard currently exposes the dials individually, with validations):
 
-| | **Perfil atención** | **Perfil renta** | **Balanceado** |
+| | **Attention profile** | **Income profile** | **Balanced** |
 |---|---|---|---|
-| Gracia | larga (18–24m) | corta (0–6m) | 12m |
-| Retención | alta | baja | media |
-| Curva | terminal alto | terminal bajo | medio |
-| Resultado | A protagonista, B tardío y chico | B protagonista, A se seca rápido | migración gradual |
+| Grace period | long (18–24m) | short (0–6m) | 12m |
+| Retention | high | low | medium |
+| Curve | high terminal | low terminal | medium |
+| Outcome | A takes the lead, B late and small | B takes the lead, A drains quickly | gradual migration |
 
 ---
 
-## 7. Decisiones tomadas y lo que queda abierto
+## 7. Decisions made and what remains open
 
-### 7.1 La decisión legal — resuelta en el cruce
+### 7.1 The legal decision — resolved at the crossing
 
-`TOKENOMICS.md` §7 sostenía que A estaba limpio **precisamente porque no estaba soldado a B**, y
-la objeción natural a este modelo era que el vínculo 1:1 convierte a A en la única vía de acceso
-a un instrumento que distribuye flujo de caja — o sea, bajo Howey, probablemente un security.
+`TOKENOMICS.md` §7 held that A was clean **precisely because it was not welded to B**, and
+the natural objection to this model was that the 1:1 link turns A into the only access path
+to an instrument that distributes cash flow — that is, under Howey, probably a security.
 
-▶ **Decisión: el gate está en el cruce, no en la curva.** A es un token de plataforma, como en
-Virtuals, y su mercado es permissionless. La conversión A→B **ocurre únicamente dentro de
-DobProtocol**, así que quien cruza pasa por el KYC y el compliance que ahí ya están construidos
-para B. El instrumento que distribuye flujo de caja nunca sale de un entorno regulado, y la
-curva no arrastra esa carga.
+▶ **Decision: the gate is at the crossing, not at the curve.** A is a platform token, as in
+Virtuals, and its market is permissionless. The A→B conversion **happens only inside
+DobProtocol**, so whoever crosses goes through the KYC and compliance already built there
+for B. The instrument that distributes cash flow never leaves a regulated environment, and the
+curve does not carry that burden.
 
-**Deja de ser bloqueante.** El residuo es económico, no legal, y está asumido: el arbitraje que
-sostiene `P_A ≥ P_B` solo existe para los usuarios que pueden cruzar; para el resto, A flota sin
-piso (§3.3).
+**It is no longer blocking.** The residue is economic, not legal, and it is accepted: the arbitrage that
+sustains `P_A ≥ P_B` only exists for users who can cross; for everyone else, A floats with no
+floor (§3.3).
 
-### 7.2 Estado de las cinco preguntas que estaban abiertas
+### 7.2 Status of the five questions that were open
 
-| # | Tema | Resolución |
+| # | Topic | Resolution |
 |---|---|---|
-| 1 | ¿`soro_splitter` tiene barrido de admin? | ▶ **Deja de importar.** El admin es el `AgentController`, no una wallet (§3.2). |
-| 2 | Calibración descuento ↔ curva | ▶ **Modelo Virtuals con DOBX como quote token** (§2). La calibración numérica sigue pendiente (#3 abajo). |
-| 3 | Piso de retención por tipo de activo | ▶ **Diferido.** No es un problema hoy; se calibra con datos reales (§5.2). |
-| 4 | Vesting del B retenido | ▶ **Resuelto por el `AgentController`** (§5.3). |
-| 5 | Estatus legal de A | ▶ **Resuelto: KYC en el cruce** (§7.1). |
+| 1 | Does `soro_splitter` have an admin sweep? | ▶ **No longer matters.** The admin is the `AgentController`, not a wallet (§3.2). |
+| 2 | Discount ↔ curve calibration | ▶ **Virtuals model with DOBX as quote token** (§2). Numerical calibration is still pending (#3 below). |
+| 3 | Retention floor per asset type | ▶ **Deferred.** Not a problem today; calibrated with real data (§5.2). |
+| 4 | Vesting of retained B | ▶ **Solved by the `AgentController`** (§5.3). |
+| 5 | Legal status of A | ▶ **Solved: KYC at the crossing** (§7.1). |
 
-### 7.3 Lo que estas decisiones dejan abierto
+### 7.3 What these decisions leave open
 
-Consecuencias, no objeciones: cada una nace de una de las resoluciones de arriba.
+Consequences, not objections: each one stems from one of the resolutions above.
 
-| # | Tema | Sección | Tipo |
+| # | Topic | Section | Type |
 |---|---|---|---|
-| 1 | **El capex liberado queda en DOBX** y financiar un activo físico obliga a venderlo. | §4.2 | ❓ decidir — el más urgente |
-| 2 | **El piso de A queda expuesto al FX de DOBX**; su volatilidad se propaga a todos los agentes. | §3.3 | ❓ decidir |
-| 3 | **Inmutabilidad del `AgentController`**: si es actualizable sin timelock, reabre todo lo que cierra. | §3.2 | ❓ decidir |
-| 4 | **Emisión y distribución de DOBX**: supply, quién lo tiene al arrancar, cómo llega el comprador que solo tiene USDC. | §2 | ❓ decidir |
-| 5 | **Calibración del precio terminal** contra lo que B cotice en un agente real (§3.4). | §3.4 | ❓ decidir |
-| 6 | **El arbitraje solo existe para quien pasa el KYC.** | §3.3 | asumido |
-| 7 | Atestación del ingreso (`OperatorStake` ya construido, la atestación misma no). | — | heredado de `TOKENOMICS.md` §6 |
-| 8 | **Granularidad de B.** El `ParticipationToken` de DobProtocol tiene `decimals() == 0` y el límite de shares es 10 000 000. Si el pool se crea con porcentajes 1–100, toda conversión normal revierte con `"dust"`. | PUENTE §3.3 | ❓ decidir antes de cablear |
-| 9 | **Separación dueño-del-pool / controller** y su consecuencia en la UI (mostrar montos de 0 decimales). | PUENTE §3.4, §4 | ▶ decidido acá, falta construir |
+| 1 | **Released capex stays in DOBX**, and financing a physical asset forces selling it. | §4.2 | ❓ decide — the most urgent |
+| 2 | **The floor of A is exposed to DOBX FX**; its volatility propagates to all agents. | §3.3 | ❓ decide |
+| 3 | **Immutability of the `AgentController`**: if it is upgradeable without a timelock, it reopens everything it closes. | §3.2 | ❓ decide |
+| 4 | **DOBX issuance and distribution**: supply, who holds it at launch, how a buyer holding only USDC gets in. | §2 | ❓ decide |
+| 5 | **Calibration of the terminal price** against what B trades at for a real agent (§3.4). | §3.4 | ❓ decide |
+| 6 | **The arbitrage only exists for those who pass KYC.** | §3.3 | accepted |
+| 7 | Revenue attestation (`OperatorStake` already built, the attestation itself not). | — | inherited from `TOKENOMICS.md` §6 |
+| 8 | **Granularity of B.** DobProtocol's `ParticipationToken` has `decimals() == 0` and the share limit is 10 000 000. If the pool is created with percentages 1–100, every normal conversion reverts with `"dust"`. | PUENTE §3.3 | ❓ decide before wiring |
+| 9 | **Pool-owner / controller separation** and its consequence in the UI (showing 0-decimal amounts). | PUENTE §3.4, §4 | ▶ decided here, still to build |
 
 ---
 
-## 8. Impacto en el código
+## 8. Impact on the code
 
-> **Estado 09-08-2026:** esta sección se escribió como trabajo futuro y ya no lo es. Las tres
-> tablas están **ejecutadas** salvo lo que marca [`ESTADO.md`](ESTADO.md) §5. Lo que queda
-> pendiente de este capítulo, en concreto: **calibrar** el precio terminal contra la producción
-> por acción (sigue abierto), y **cablear el pool real** en lugar de `MockParticipation`
-> (ver [`dobx-pro/docs/PUENTE.md`](../../dobx-pro/docs/PUENTE.md) §3).
+> **Status 2026-08-09:** this section was written as future work and no longer is. The three
+> tables are **executed** except for what [`STATUS.md`](STATUS.md) §5 flags. What remains
+> pending from this chapter, specifically: **calibrating** the terminal price against production
+> per share (still open), and **wiring the real pool** instead of `MockParticipation`
+> (see `dobx-pro/docs/PUENTE.md` §3, private dobx-pro repo).
 
 ### `dobx-contracts`
-| Acción | Qué |
+| Action | What |
 |---|---|
-| Crear | **`DOBX`** (token de plataforma), **`AgentController`** (admin del pool + custodia del B retenido con cliff) |
-| Eliminar | `AgentConverter`, `AgentBuyback`, `AgentTreasury`, `TokenomicsFactory` |
-| Modificar | `AgentBondingCurve`: liberación de reserva contra quema de A (§4) |
-| Mantener | `AgentShareToken`, `AgentAMM`, `OperatorStake` |
-| Configurar | `AgentLaunchpad.setQuoteToken(DOBX)` — y **relanzar** los agentes existentes (§2) |
-| Calibrar | precio terminal de la curva contra la producción por acción del pool (§3.4) |
+| Create | **`DOBX`** (platform token), **`AgentController`** (pool admin + custody of retained B with cliff) |
+| Remove | `AgentConverter`, `AgentBuyback`, `AgentTreasury`, `TokenomicsFactory` |
+| Modify | `AgentBondingCurve`: reserve release against burning of A (§4) |
+| Keep | `AgentShareToken`, `AgentAMM`, `OperatorStake` |
+| Configure | `AgentLaunchpad.setQuoteToken(DOBX)` — and **relaunch** existing agents (§2) |
+| Calibrate | curve terminal price against the pool's production per share (§3.4) |
 
 ### `dobx-pro/apps/api`
-| Archivo | Cambio |
+| File | Change |
 |---|---|
-| `services/tokenize.service.js` | pasar `payoutMode = 0`, `payment_token = A`, admin = `AgentController`, `participation_to_sale`, gracia, descuento y duración al crear el pool; dejar de fijar `participants: [{operator, 100}]` |
-| `services/payout.service.js` | eliminar `operator_split_bps` y toda la lógica de buyback (`buyback_bps`, `buyback_address`, leg 1); el router queda solo con la pata de distribución |
-| `services/evm-launch.client.js` | eliminar `fundBuyback`, `deployTokenomics` |
-| `config.js` | eliminar `defaultOperatorSplitBps` |
-| `db.js` | migrar: fuera `buyback_bps`, `buyback_address`, `converter_address`, `treasury_address`; entra `controller_address` y la config de pool del creador |
-| `services/market.service.js` | `convert()` deja de ser "vender A + comprar B a $1"; pasa a ser la contribución a la campaña. `TERMINAL_PRICE` deja de ser hardcodeado |
-| `routes/agents.routes.js` | eliminar el `$1 = 1 B` mock; B se adquiere solo por conversión |
+| `services/tokenize.service.js` | pass `payoutMode = 0`, `payment_token = A`, admin = `AgentController`, `participation_to_sale`, grace period, discount and duration when creating the pool; stop hardcoding `participants: [{operator, 100}]` |
+| `services/payout.service.js` | remove `operator_split_bps` and all buyback logic (`buyback_bps`, `buyback_address`, leg 1); the router keeps only the distribution leg |
+| `services/evm-launch.client.js` | remove `fundBuyback`, `deployTokenomics` |
+| `config.js` | remove `defaultOperatorSplitBps` |
+| `db.js` | migrate: drop `buyback_bps`, `buyback_address`, `converter_address`, `treasury_address`; add `controller_address` and the creator's pool config |
+| `services/market.service.js` | `convert()` stops being "sell A + buy B at $1"; it becomes the contribution to the campaign. `TERMINAL_PRICE` is no longer hardcoded |
+| `routes/agents.routes.js` | remove the `$1 = 1 B` mock; B is acquired only through conversion |
 
 ### `dobx-pro/apps/web`
-| Qué | Cambio |
+| What | Change |
 |---|---|
-| Wizard de tokenización | los 5 parámetros de §6 con presets y acoplamientos en vivo |
-| Página de agente | mostrar gracia, calendario, producción restante, piso actual de A, % retenido por el creador |
-| Flujo de conversión | un paso (contribuir a la campaña con A), no dos |
-| Trading | precios en DOBX, no en USDC |
+| Tokenization wizard | the 5 parameters of §6 with presets and live couplings |
+| Agent page | show grace period, schedule, remaining production, current floor of A, % retained by the creator |
+| Conversion flow | one step (contribute A to the campaign), not two |
+| Trading | prices in DOBX, not USDC |
 
 ---
 
-## 9. Resumen ejecutivo
+## 9. Executive summary
 
-1. **Un solo camino de entrada:** DOBX → A (curva/AMM), modelo Virtuals. A es perpetuo,
-   especulativo y su mercado es permissionless.
-2. **Una conversión one-way 1:1 con mismo cap** hacia B, que es la participación de un pool de
-   DobProtocol — **abierto**: sin monto, tasa ni plazo; se sale vendiendo B.
-3. **El A convertido se inmoviliza** (crowdfunding con `payment_token = A` y `payoutMode = 0`),
-   y esa quema es lo que libera reserva de la curva hacia el capex del activo.
-4. **El `AgentController` es el admin del pool**, no una wallet: eso convierte "inmovilizado" en
-   una garantía verificable y aplica el cliff del B retenido.
-5. **El 100% del ingreso x402 aterriza en el pool.** Todos los cortes viven en la cap table. La
-   ganancia del operador es su `participation_to_sale` retenido, pari passu con los inversionistas.
-6. **El período de gracia separa las fases:** año 1 puro mercado de atención para A; después,
-   migración hacia renta.
-7. **Lo legal se resuelve en el cruce:** KYC/compliance de DobProtocol sobre el paso A→B.
-8. **El creador navega cinco parámetros acoplados**, con presets que hacen visibles los
-   trade-offs — hoy los tomaría a ciegas porque ninguno está expuesto.
+1. **A single entry path:** DOBX → A (curve/AMM), Virtuals model. A is perpetual,
+   speculative, and its market is permissionless.
+2. **A one-way 1:1 conversion with the same cap** into B, which is the participation in a
+   DobProtocol pool — **open**: no amount, rate or term; you exit by selling B.
+3. **Converted A is immobilized** (crowdfunding with `payment_token = A` and `payoutMode = 0`),
+   and that burn is what releases curve reserve toward the asset's capex.
+4. **The `AgentController` is the pool admin**, not a wallet: that turns "immobilized" into
+   a verifiable guarantee and enforces the cliff on retained B.
+5. **100% of x402 revenue lands in the pool.** All cuts live in the cap table. The
+   operator's profit is their retained `participation_to_sale`, pari passu with the investors.
+6. **The grace period separates the phases:** year 1 is pure attention market for A; afterwards,
+   migration toward income.
+7. **The legal side is resolved at the crossing:** DobProtocol KYC/compliance on the A→B step.
+8. **The creator navigates five coupled parameters**, with presets that make the
+   trade-offs visible — today they would make them blind because none is exposed.
 
-Se elimina: buyback, converter, tesorería B, factory, oráculos, TWAP, keeper, MEV, y el split
-off-the-top. Se gana: un solo precio de entrada, un piso mecánico para A, financiamiento
-auto-alineado, auditoría completa en la address del pool, y un sink real para DOBX.
+Removed: buyback, converter, B treasury, factory, oracles, TWAP, keeper, MEV, and the
+off-the-top split. Gained: a single entry price, a mechanical floor for A, self-aligned
+financing, a full audit at the pool address, and a real sink for DOBX.
 
-Se paga con: **el encaje restringido a activos ya financiados** (§4.3), **la exposición del piso
-de A al FX de DOBX** (§3.3), y sobre todo **la tensión entre el sink de DOBX y el financiamiento
-del capex** (§4.2), que es el pendiente más urgente.
+Paid for with: **the fit restricted to already-financed assets** (§4.3), **the exposure of the floor
+of A to DOBX FX** (§3.3), and above all **the tension between the DOBX sink and capex
+financing** (§4.2), which is the most urgent pending item.

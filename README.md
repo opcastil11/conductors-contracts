@@ -1,111 +1,169 @@
-# dobx-contracts
+# conductos-contracts
 
-Smart contracts for **dobx.pro** — the RWA agent launchpad. This repo holds the on-chain layer of
-the **one-way A→B model**: a per-agent bonding curve quoted in **DOBX** that graduates into an
-AMM, plus the controller that lets a holder cross, once and irreversibly, from the agent token
-into a participation in the asset's future revenue.
+**On-chain layer of [dobx.pro](https://dobx.pro): a launchpad that gives every real-world-asset
+agent a fair-launched market token, and a one-way door from that token into the asset's revenue.**
 
-> Separate, public-facing repo (kept apart from the private `dobx-pro` app) so the contracts
-> can be verified and audited independently. **Pre-audit — do not deploy to mainnet with real
-> funds until audited.**
+[![Solidity](https://img.shields.io/badge/Solidity-0.8.24-363636?logo=solidity)](https://soliditylang.org)
+[![Hardhat](https://img.shields.io/badge/Built%20with-Hardhat-f7df1e)](https://hardhat.org)
+[![Foundry](https://img.shields.io/badge/Fuzzed%20with-Foundry-black)](https://getfoundry.sh)
+[![OpenZeppelin](https://img.shields.io/badge/OpenZeppelin-5.x-4e5ee4)](https://openzeppelin.com/contracts)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-## What this is
+> [!WARNING]
+> **Pre-audit.** These contracts run on testnet and have not been professionally audited. Do not
+> deploy them to mainnet with real funds.
 
-Every agent has **two** products, and they are not the same asset:
+---
 
-- **A — the agent token.** Perpetual, speculative, permissionless, quoted in DOBX. Fair-launched
-  on a bonding curve that graduates into a locked-liquidity AMM. A pays no distributions; its
-  link to the real asset is the **right to convert**.
-- **B — participation in a DobProtocol future-revenue pool.** Finite and amortizing: it pays out
-  a bounded total production and then ends. This is the instrument that actually receives the
-  x402 revenue.
+## Overview
+
+Each agent on dobx.pro operates a real asset (through **DOBI**) whose revenue is distributed by
+a **DobProtocol** pool. The agent exposes two distinct products:
+
+| | **A — agent token** | **B — revenue participation** |
+|---|---|---|
+| Nature | Perpetual, speculative market token | Finite, amortizing claim on future revenue |
+| Access | Permissionless trading | KYC required |
+| Issued by | This repo (`AgentShareToken`) | DobProtocol pool |
+| Pays out | Nothing directly — its value is the **right to convert** | 100% of the revenue that reaches the pool |
+| Market | Bonding curve → locked-liquidity AMM, quoted in **DOBX** | DobProtocol |
+
+Holders can convert **A → B** once and irreversibly. Conversion burns A, releases the curve
+reserve that backed it to fund the asset's capex, and hands back B at a pro-rata ratio fixed at
+activation. B can never be turned back into A.
+
+## Architecture
 
 ```
-launch ──► AgentShareToken (A, fixed supply, minted into the curve)
-           AgentBondingCurve  ── buy/sell in DOBX, price rises with supply sold
-                │  raised ≥ graduationRaise
-                ▼
-           _graduate(): deploy AgentAMM, seed (leftover A + DOBX raised), LOCK LP
-                ▼
-           AgentAMM (x*y=k, 0.3% fee)  ── continuous DOBX market
+                 AgentLaunchpad.launch()
+                          │
+          ┌───────────────┴────────────────┐
+          ▼                                ▼
+   AgentShareToken (A)            AgentBondingCurve ── buy / sell in DOBX
+   fixed supply, minted                    │          price = base + sold · slope
+   into the curve                          │  raised ≥ graduationRaise
+                                           ▼
+                                  AgentAMM (x·y = k, 0.3% fee)
+                                  seeded at the curve's terminal price,
+                                  LP locked forever
 
-                ── and, once the agent's DobProtocol pool exists ──
+          ── once the agent's DobProtocol pool exists ──
 
-           AgentController ── convert(A) ──► burns A, releases the matching reserve
-                              to capex, hands back B. One-way. Never B→A.
+   AgentLaunchpad.deployController()
+          │
+          ▼
+   AgentController ── convert(A) ──►  burn A
+          │                           release backing reserve ──► capexSink
+          │                           transfer B ──► holder (KycRegistry-gated)
+          └── vests the creator's retained B (cliff + linear)
 ```
 
 ## Contracts
 
-| Contract | Purpose |
+| Contract | Responsibility |
 |---|---|
-| `DOBX.sol` | The platform token: fixed 1e9 supply minted to the treasury, no mint function, burnable. The quote token of **every** agent curve. |
-| `AgentLaunchpad.sol` | Factory + registry. `launch(params)` deploys A + its curve and mints the supply in; `deployController(agentId, params)` attaches the A→B crossing once the agent's B pool exists. |
-| `AgentShareToken.sol` | Fixed-supply ERC20 for one agent's A. No mint after launch, no owner. Burnable by the holder — which is how the curve retires converted A. |
-| `AgentBondingCurve.sol` | Linear curve priced **per whole share in DOBX** (`price = basePrice + sold*slope`; cost = the integral). Graduates at `graduationRaise`. `redeemForConversion` — callable **only** by the bound controller — burns A and releases exactly the reserve that A's claim represented. |
-| `AgentAMM.sol` | Constant-product AMM (`x*y=k`, 0.3% fee) for A ↔ DOBX. The post-graduation market. |
-| `AgentController.sol` | The crossing. Immutable, ownerless. Snapshots the cap table at `activate()`, then `convert()` burns A, routes the released DOBX to the capex sink, and issues B at a fixed pro-rata ratio. Also custodies the creator's retained B behind a cliff + linear vest. |
-| `AgentControllerFactory.sol` | Holds the controller's creation code so the launchpad fits under the 24 KB limit. No owner, no state, no funds. |
-| `KycRegistry.sol` | The allowlist consulted at the crossing — and nowhere else. Trading A stays permissionless. |
-| `mocks/MockUSDC.sol`, `mocks/MockParticipation.sol` | 6-dp USDC and a Product-B stand-in for tests. |
+| [`DOBX`](contracts/DOBX.sol) | Platform token and quote asset of every curve. Fixed 1e9 supply minted to the treasury, no mint function, burnable. |
+| [`AgentLaunchpad`](contracts/AgentLaunchpad.sol) | Factory and registry. `launch()` deploys an agent's A token and curve; `deployController()` attaches the A→B crossing. Gated and pausable. |
+| [`AgentShareToken`](contracts/AgentShareToken.sol) | Fixed-supply ERC-20 for one agent's A. No owner, no mint after launch; holder-burnable. |
+| [`AgentBondingCurve`](contracts/AgentBondingCurve.sol) | Linear curve priced per whole share in DOBX. Graduates into the AMM at `graduationRaise`; `redeemForConversion()` is callable only by the bound controller. |
+| [`AgentAMM`](contracts/AgentAMM.sol) | Constant-product AMM for A ↔ DOBX with explicit reserves (donation-proof). |
+| [`AgentController`](contracts/AgentController.sol) | The crossing. Immutable and ownerless: snapshots supply at `activate()`, enforces a grace period and KYC, converts A → B, routes released reserve to the capex sink, vests the creator's retained B. |
+| [`AgentControllerFactory`](contracts/AgentControllerFactory.sol) | Holds the controller's creation code so the launchpad stays under the 24 KB limit. Stateless. |
+| [`AgentFeeSplitter`](contracts/AgentFeeSplitter.sol) | Fee recipient of a curve. Splits trading fees between the agent's wallet and the platform (default 65 / 35, agent share floored at 50%). |
+| [`KycRegistry`](contracts/KycRegistry.sol) | On-chain mirror of DobProtocol's KYC. Consulted only at the crossing; trading A stays permissionless. |
+| [`OperatorStake`](contracts/OperatorStake.sol) | Operator bond with cooldown-delayed withdrawals, slashable on proven under-reporting of revenue. |
 
-## Tokenomics
+## Security properties
 
-The value model — the two products, the one-way conversion, why releasing curve reserve against
-burned A is solvency-preserving, the price floor `P_A ≥ P_B` and its decay, and the five coupled
-creator parameters — is specified in **[docs/TOKENOMICS-V2.md](docs/TOKENOMICS-V2.md)** (vigente).
-[docs/TOKENOMICS.md](docs/TOKENOMICS.md) is the superseded 2026-07-05 model (buyback + treasury +
-USDC-mediated conversion) and is kept only for history.
+- **No graduation price cliff.** The AMM is seeded at the curve's terminal price (0.11% drift
+  measured on a live testnet run; the E2E script fails above 1%).
+- **Solvent conversions.** Pre-graduation, released reserve equals the top-of-curve integral of
+  the burned shares, which is the same arithmetic as a sell. Post-graduation, the controller withdraws a
+  proportional LP slice and burns its A leg, so the DOBX backing of every circulating A is unchanged.
+- **Locked liquidity.** LP tokens are held by the curve, which has no withdrawal path except the
+  proportional shrink above.
+- **Immutable crossing.** `AgentController` has no owner, proxy, setter or sweep, and
+  `bindController` is one-shot, so a live crossing cannot be re-pointed.
+- **AMM hardening.** Explicit reserves (no `balanceOf` pricing, no first-depositor attack),
+  matched-pair `addLiquidity`, and deadlines on every state-changing trade.
+- **Compliance at the edge.** KYC applies only to the A → B conversion.
 
-## Design notes
+The key and role model, threat analysis and pre-mainnet separation plan are in
+[docs/OPERATIONS.md](docs/OPERATIONS.md).
 
-- **Quote = DOBX (18 dp).** Pricing is denominated **per whole share**, so the integral stays
-  exact integer arithmetic.
-- **Conversion releases reserve, and that is safe.** Pre-graduation the released amount is the
-  top-of-curve integral for the shares being retired — arithmetically identical to a sell, so
-  every remaining holder can still exit. Post-graduation the reserve lives in the AMM, so the
-  controller withdraws the *proportional* LP slice and burns the A leg, leaving DOBX-per-
-  circulating-A untouched. The capex is not financed by the raise; it is financed by conversions.
-- **Liquidity is locked forever.** The LP is minted to the curve, which has no withdrawal path
-  other than the proportional shrink above.
-- **The controller is immutable.** No owner, no proxy, no setter, no sweep. The accepted cost is
-  that tokens sent to it by mistake are stuck forever.
-- **Binding is one-shot.** `bindController` is launchpad-only and refuses a second call, so an
-  agent's crossing can never be re-pointed after it is live.
-- **Compliance sits at the crossing.** A is permissionless to trade; KYC is required only to
-  convert into B.
+## Deployments
 
-## How it plugs into dobx / DOBI / DobProtocol
+### Base Sepolia (chain id 84532)
 
-- **DOBI** operates the asset and produces the real revenue (x402 pay-per-use).
-- **DobProtocol** runs the future-revenue pool and distributes 100% of what lands there to B
-  holders, with every cut expressed inside the cap table.
-- **These contracts** provide the attention market (A), and the one-way door from it into B.
+| Contract | Address |
+|---|---|
+| DOBX | [`0x7E18D1DE113C7F0D02998f61F2715bA5acE5E3c5`](https://sepolia.basescan.org/address/0x7E18D1DE113C7F0D02998f61F2715bA5acE5E3c5) |
+| AgentLaunchpad | [`0xA16C303E28F5220196f84fEAa7A1E376f29bd6CA`](https://sepolia.basescan.org/address/0xA16C303E28F5220196f84fEAa7A1E376f29bd6CA) |
+| AgentControllerFactory | [`0x8aA347f079B34fD189bD72B5AfeF604F59dDcC3b`](https://sepolia.basescan.org/address/0x8aA347f079B34fD189bD72B5AfeF604F59dDcC3b) |
+| KycRegistry | [`0x8c75969aF053a4b4203685b441EDCe9372B077d2`](https://sepolia.basescan.org/address/0x8c75969aF053a4b4203685b441EDCe9372B077d2) |
 
-## Develop
+### Supported networks
+
+| Network | Hardhat name | Chain id |
+|---|---|---|
+| Base | `base` | 8453 |
+| Base Sepolia | `baseSepolia` | 84532 |
+| Arbitrum One | `arbitrumOne` | 42161 |
+| Arbitrum Sepolia | `arbitrumSepolia` | 421614 |
+| Robinhood Chain | `robinhood` | 4663 |
+
+## Getting started
+
+Requirements: Node.js 20+, and [Foundry](https://getfoundry.sh) for the fuzz suite.
 
 ```bash
+git clone --recurse-submodules https://github.com/opcastil11/conductos-contracts.git
+cd conductos-contracts
 npm install
 npm run compile
-npm test            # 42 passing — lifecycle, graduation, AMM, and the full A→B crossing
-
-cp .env.example .env  # set PRIVATE_KEY, PLATFORM_TREASURY (and DOBX_ADDRESS after the first deploy)
-npm run deploy:baseSepolia
 ```
 
-## Status
+### Test
 
-Reference implementation of TOKENOMICS-V2, **pre-audit**. Tests green (`npm test`, 42 passing).
+```bash
+npm test      # Hardhat: lifecycle, graduation, AMM, fee split and the full A→B crossing
+forge test    # Foundry: curve fuzzing, AMM and stake invariants
+```
 
-**Internal audit fixes applied** (see the 3-front audit): graduation seeds the AMM at ~the
-curve's terminal price (no price cliff); the AMM uses **explicit reserves** (not `balanceOf`) so
-donations can't move price / no first-depositor attack; `addLiquidity` pulls only the matched
-pair; **deadlines** on all curve/AMM state changes; `launch()` is **gated** and **Pausable**;
-inventory is donation-proof; leftover inventory → treasury; graduation config is validated.
+End-to-end scripts that run against a live testnet deployment (`scripts/e2e-*.js`) are
+described in [docs/STATUS.md](docs/STATUS.md#3-what-is-verified-against-a-real-chain).
 
-**Still open before mainnet:** professional audit; **Foundry fuzz/invariant suite** (curve
-solvency across conversions, k-monotonicity, graduation reachability, seed-price bounds); the
-graduating buy is not partial-filled (a single oversized buy can overshoot `graduationRaise`);
-and the open items in [docs/TOKENOMICS-V2.md](docs/TOKENOMICS-V2.md) §7.3 — chiefly §4.2, that
-released reserve is DOBX while capex is fiat. Do not deploy to mainnet with real funds until
-audited.
+### Deploy
+
+```bash
+cp .env.example .env          # PRIVATE_KEY, PLATFORM_TREASURY, RPC URLs, explorer API keys
+npm run deploy:baseSepolia    # or deploy:arbitrumSepolia, deploy:base, deploy:arbitrum
+```
+
+The first deploy on a network mints DOBX. On every later deploy, set `DOBX_ADDRESS` so all curves
+share one quote token. Addresses are written to `deployments/<network>.json` (gitignored). See
+the full runbook in [docs/DEPLOY.md](docs/DEPLOY.md).
+
+## Documentation
+
+| Document | Contents |
+|---|---|
+| [TOKENOMICS-V2](docs/TOKENOMICS-V2.md) | Current economic model: the two products, one-way conversion, price floor and creator parameters |
+| [STATUS](docs/STATUS.md) | What is deployed and verified on-chain, and what is not built yet |
+| [OPERATIONS](docs/OPERATIONS.md) | Roles and keys, threat model, key-separation plan, operational runbook |
+| [DEPLOY](docs/DEPLOY.md) | Deployment runbook and per-agent wiring |
+| [TOKENOMICS (v1)](docs/TOKENOMICS.md) | Superseded 2026-07-05 model, kept for history |
+
+## Roadmap to mainnet
+
+- [x] Bonding curve, AMM graduation, A→B crossing, KYC gate and fee splitter
+- [x] Internal audit fixes, Foundry fuzz/invariant suite, live-testnet E2E runs
+- [ ] Integrate DobProtocol's production participation pools (tests currently use a mock B)
+- [ ] Key separation: dedicated treasury, delegated KYC attestor, multisig + timelock owner
+- [ ] Partial fill of the graduating buy (an oversized buy can overshoot `graduationRaise`)
+- [ ] Resolve the open economic items in [TOKENOMICS-V2 §7.3](docs/TOKENOMICS-V2.md)
+- [ ] Professional third-party audit
+
+## License
+
+[MIT](LICENSE)
