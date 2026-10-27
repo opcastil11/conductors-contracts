@@ -3,7 +3,7 @@
 > **Status: CURRENT. 2026-08-08.** Supersedes [`TOKENOMICS.md`](TOKENOMICS.md) (signed
 > 2026-07-05), which remains as the historical record of the buyback/converter/treasury model.
 > This document is the full derivation; the browsable version, with per-component build status,
-> lives at `dobx.pro/arquitectura` (`dobx-pro/apps/web/src/pages/ArchitecturePage.tsx`, in the private dobx-pro repo).
+> lives at `conductors.io/arquitectura` (`dobx-pro/apps/web/src/pages/ArchitecturePage.tsx`, in the private Conductors app repo).
 >
 > Notation:
 > **✅ verified** = confirmed by reading the code, with reference · **▶ decided** = decision
@@ -26,7 +26,7 @@
 >
 > Two substantive corrections, both derived from reading DobProtocol's deployed code:
 > **(a)** the A↔B "bridge" does not exist as a problem — DobProtocol already issues participations on Base
-> mainnet, see `dobx-pro/docs/PUENTE.md` (private dobx-pro repo); **(b)** the pool admin
+> mainnet, see `dobx-pro/docs/PUENTE.md` (private Conductors app repo); **(b)** the pool admin
 > **cannot** be the `AgentController` (§3.2 is corrected below).
 
 ---
@@ -51,7 +51,7 @@ revenue.**
 | `AgentTreasury` (B reserve, backstop) | ✅ built | **removed** |
 | `TokenomicsFactory` | ✅ built | **removed** |
 | Revenue split | operator% / buyback% (10–50%) / distribution% | **100% to the pool**; every cut happens inside the cap table |
-| `operator_split_bps` (dobx BFF) | 30% off-the-top | **removed** |
+| `operator_split_bps` (Conductors BFF) | 30% off-the-top | **removed** |
 | Operator profit | off-the-top split + treasury | **retained `participation_to_sale`**, held in custody by the controller |
 | Floor of A | indirect arbitrage across two markets | **mechanical `P_A ≥ P_B`**, with an FX term; `P_B` is a market price |
 | Capex financing | undefined (conflict with the curve reserve) | **reserve release on burning A** — ❓ with one open edge (§4.2) |
@@ -198,7 +198,7 @@ The same contract absorbs the other rule that was needed:
 > §3.2 meant to guarantee **is not lost** — it is still true that nobody can take B away from a
 > converter, change the ratio after `activate()`, or move quote to any destination other than the
 > `capexSink`. What falls is the sentence "the pool admin is a contract, not a wallet".
-> Full derivation in `dobx-pro/docs/PUENTE.md` §4 (private dobx-pro repo).
+> Full derivation in `dobx-pro/docs/PUENTE.md` §4 (private Conductors app repo).
 
 ### 3.3 Price relationship
 
@@ -317,7 +317,7 @@ gross **before** the money reaches the pool. That breaks two things:
 
 **✅ verified:** `pool_data.participation_to_sale` is literally "percentage of pool for
 sale" and `calculatedApr` already uses it (`poolUtils.service.js:344`). It is not a new feature — it is a
-field that dobx does not expose today: `tokenize.service.completeInit` puts in
+field that Conductors does not expose today: `tokenize.service.completeInit` puts in
 `participants: [{ operator, 100 }]` and never sets `participation_to_sale`.
 
 ▶ **The tokenization wizard asks the creator what % of future revenue they retain.**
@@ -442,9 +442,9 @@ Consequences, not objections: each one stems from one of the resolutions above.
 > tables are **executed** except for what [`STATUS.md`](STATUS.md) §5 flags. What remains
 > pending from this chapter, specifically: **calibrating** the terminal price against production
 > per share (still open), and **wiring the real pool** instead of `MockParticipation`
-> (see `dobx-pro/docs/PUENTE.md` §3, private dobx-pro repo).
+> (see `dobx-pro/docs/PUENTE.md` §3, private Conductors app repo).
 
-### `dobx-contracts`
+### `conductors-contracts`
 | Action | What |
 |---|---|
 | Create | **`DOBX`** (platform token), **`AgentController`** (pool admin + custody of retained B with cliff) |

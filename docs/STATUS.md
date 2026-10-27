@@ -3,7 +3,7 @@
 > **Cutoff: 2026-08-09.** This document exists because [`TOKENOMICS-V2.md`](TOKENOMICS-V2.md) is
 > a *derivation* — it says what should happen — and until now there was no place that said what
 > **does** happen. When the two contradict each other, this one wins: the source of truth for this
-> file is addresses on Base Sepolia and responses from `https://dobx.pro/api`, not the design.
+> file is addresses on Base Sepolia and responses from `https://conductors.io/api`, not the design.
 >
 > Writing rule: **nothing goes in here without an address, an endpoint or a script that
 > reproduces it.** "It's implemented" without one of those goes in §5 (what's missing), not in §1.
@@ -43,7 +43,7 @@ and the *paid* rate. Deleting them is task #7 and is the user's decision.
 | `agt_fab6265bbe9546409a23` "E2E Ratio" | `0x5C7C185Cc97d1330bdC75D2F4f0c506619e665A6` | 30% | 0.7 B per A | 0 s |
 
 Both: 100,000 USD pool, 36 months, 15% discount, A floor = 0.0824 USD.
-Verifiable without credentials: `curl -s https://dobx.pro/api/agents`.
+Verifiable without credentials: `curl -s https://conductors.io/api/agents`.
 
 ## 3. What is verified against a real chain
 
@@ -81,7 +81,7 @@ has changed to `true`. Measured: **0.109% drift** between the curve's terminal p
 - The leftover A inventory is reported by subtracting what was bought, because in this deployment
   `platformTreasury` **is** the signer and its balance includes the A the script has just bought.
 
-## 4. What exists in the BFF / web (`dobx-pro`, commit `52b8d2f`)
+## 4. What exists in the BFF / web (private Conductors app repo, commit `52b8d2f`)
 
 | Piece | Where | Status |
 |---|---|---|
@@ -100,7 +100,7 @@ This is the honest list. Nothing here has an address or an endpoint.
 
 | # | Missing | Why it matters |
 |---|---|---|
-| 1 | **The real DobProtocol pool as product B.** All E2E runs use `MockParticipation`. | The crossing is tested against a toy ERC-20. See `PUENTE.md` (private dobx-pro repo): the V2 stack on Base **already exists**, it still needs to be wired in. |
+| 1 | **The real DobProtocol pool as product B.** All E2E runs use `MockParticipation`. | The crossing is tested against a toy ERC-20. See `PUENTE.md` (private Conductors app repo): the V2 stack on Base **already exists**, it still needs to be wired in. |
 | 2 | **The x402 revenue circuit → pool → distribution.** | Without this B pays nothing and the A floor is theory. DOBI was down during the runs. |
 | 3 | **End-to-end KYC with a genuinely approved user.** | The 401 and the mirror are tested; the full happy path with a JWT approved by didit.me is missing. |
 | 4 | **Mainnet.** Everything lives on Base Sepolia. | — |

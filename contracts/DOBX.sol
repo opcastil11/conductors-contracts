@@ -5,7 +5,7 @@ import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 
 /**
  * @title DOBX
- * @notice The dobx platform token — the QUOTE TOKEN of every agent bonding curve and AMM
+ * @notice The Conductors platform token — the QUOTE TOKEN of every agent bonding curve and AMM
  *         (docs/TOKENOMICS-V2.md §2, "modelo Virtuals").
  *
  * Every agent launch prices Product A in DOBX, so buying into any agent is a DOBX sink and the

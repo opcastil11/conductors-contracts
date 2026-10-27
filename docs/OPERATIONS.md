@@ -40,7 +40,7 @@ If this key is lost: someone can approve themselves to cross A→B. That breaks 
 compliance of the crossing (§7.1 of TOKENOMICS-V2), not the money — the converter still burns its A.
 
 ### 1.4 BFF managed signer (`EVM_PRIVATE_KEY`)
-Lives in the dobx.pro backend (private repo). It signs:
+Lives in the Conductors backend (private repo). It signs:
 agent launches, `deployController`, the KYC mirror writes, and the faucet
 transfers. **It lives on a server**, meaning it is the key with the largest attack surface and the
 only one that an API bug can make sign.
@@ -104,7 +104,7 @@ so backing it up is part of the deploy, not an extra.
 
 ```
 launch(params)                     → agentId, token A, curve
-[token B must already exist]       → see dobx-pro/docs/PUENTE.md §3 (private dobx-pro repo)
+[token B must already exist]       → see dobx-pro/docs/PUENTE.md §3 (private Conductors app repo)
 deployController(agentId, {participationToken, capexSink, retainedBps,
                            graceSeconds, cliffSeconds, vestSeconds})
 transfer(B, controller, totalB)    → the controller holds ALL of B before activating

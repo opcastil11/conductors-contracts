@@ -11,14 +11,14 @@ import "./AgentControllerFactory.sol";
 
 /**
  * @title AgentLaunchpad
- * @notice Factory + registry for dobx agent fair launches (Product A). Each launch deploys an
+ * @notice Factory + registry for Conductors agent fair launches (Product A). Each launch deploys an
  *         {AgentShareToken} (fixed supply) + an {AgentBondingCurve} quoted in DOBX, mints the
  *         supply into the curve, validates the economics, and records the trio. Once the agent's
  *         DobProtocol pool exists, {deployController} attaches the {AgentController} that owns
  *         the A→B crossing.
  *
  * Security-hardened vs the initial draft (audit fixes):
- *  - **Gated launches**: `launch()` is restricted to authorized launchers (the dobx backend /
+ *  - **Gated launches**: `launch()` is restricted to authorized launchers (the Conductors backend /
  *    verified operators) unless `publicLaunch` is enabled — enforcing on-chain the "gated
  *    off-chain" intent and preventing spam/impersonation.
  *  - **Pausable** launching.

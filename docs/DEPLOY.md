@@ -1,4 +1,4 @@
-# dobx-contracts — Deployment Runbook
+# conductors-contracts — Deployment Runbook
 
 Status of the suite (verified 2026-08-08): **47 Hardhat tests passing**, `deploy.js` exercised
 locally. This file is the owner step, the canonical launch params, and the per-agent wiring that
@@ -37,11 +37,11 @@ npm run deploy:baseSepolia
 > one on every subsequent run. `quoteToken` in the artifact is the same address — it exists so
 > the BFF has one stable key to read.
 
-`deployments/<network>.json` is the handoff artifact — the dobx BFF chain-adapter reads these
+`deployments/<network>.json` is the handoff artifact — the Conductors BFF chain-adapter reads these
 addresses from it.
 
 **Security:** the deployer key is the launchpad `owner` and the sole `authorizedLauncher` until it
-authorizes the dobx backend signer (`setAuthorizedLauncher(backendSigner, true)`). It is also the
+authorizes the Conductors backend signer (`setAuthorizedLauncher(backendSigner, true)`). It is also the
 only caller of `deployController`. Keep it offline; rotate before mainnet. Do NOT paste it into
 chat or commit `.env`.
 
@@ -50,7 +50,7 @@ chat or commit `.env`.
 ## 2. Canonical launch params (must match the BFF market)
 
 The curve prices per **whole share** in **DOBX (18 dp)**: `price(sold) = basePrice + sold*slope`,
-cost = the exact integral. The dobx BFF (`apps/api/.../market.service.js`) mirrors these.
+cost = the exact integral. The Conductors BFF (`apps/api/.../market.service.js`) mirrors these.
 
 | Param | Value | On-chain (`LaunchParams`) |
 |-------|-------|---------------------------|
@@ -129,11 +129,11 @@ with 30% retained, 1 A → 0.7 B for the first converter and the last alike.
 4. ✅ Web signing flow: approve A → `controller.convert`, wallet-signed, single step.
 5. ⛔ TOKENOMICS-V2 §4.2 — released reserve is DOBX while capex is fiat. Converting it to fund an
    asset means selling DOBX, which opposes the sink. Unresolved; do not deploy real capex flow
-   until it is. Options written up in `PUENTE.md` (private dobx-pro repo) §6.
+   until it is. Options written up in `PUENTE.md` (private Conductors app repo) §6.
 6. Foundry fuzz/invariant suite: curve solvency **across conversions**, k-monotonicity, the
    post-graduation LP-shrink price invariant.
 7. ⛔ Product B is still `MockParticipation` in every run. Wiring the real DobProtocol pool is
-   `PUENTE.md` (private dobx-pro repo) §3 — and note §3.3: the participation token has
+   `PUENTE.md` (private Conductors app repo) §3 — and note §3.3: the participation token has
    `decimals() == 0`, so pool share granularity decides the minimum conversion.
 8. ⛔ Key separation before mainnet — [OPERATIONS.md](OPERATIONS.md) §3. Today one key is deployer,
    owner, treasury, attestor and BFF signer.

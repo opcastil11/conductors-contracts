@@ -64,7 +64,7 @@ async function main() {
   console.log(`  kycRegistry:       ${kycAddr}`);
   console.log(`  controllerFactory: ${ctrlFactoryAddr}`);
 
-  // Persist addresses so other tooling (the dobx BFF E2E) can pick them up.
+  // Persist addresses so other tooling (the Conductors BFF E2E) can pick them up.
   const outDir = path.join(__dirname, "..", "deployments");
   fs.mkdirSync(outDir, { recursive: true });
   fs.writeFileSync(

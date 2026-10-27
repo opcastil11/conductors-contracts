@@ -1,6 +1,6 @@
-# dobx.pro — Tokenomics & Mechanism Design
+# Conductors — Tokenomics & Mechanism Design
 
-> Canonical spec for how value flows through a dobx agent. Read this before touching the
+> Canonical spec for how value flows through a Conductors agent. Read this before touching the
 > contracts.
 >
 > **⚠️ SUPERSEDED 2026-08-08 by [TOKENOMICS-V2.md](TOKENOMICS-V2.md).** Kept for history only.
@@ -198,9 +198,9 @@ this contract is the escrow+slash primitive that gives that attestation teeth.
 ## 7. Regulatory framing — handled by DobProtocol's distribution layer
 
 **Scope decision (owner, 2026-07-05): the legal/compliance for the income side is DobProtocol's
-responsibility, not dobx's.** B *is* the DobProtocol pool participation token, and DobProtocol's
+responsibility, not Conductors'.** B *is* the DobProtocol pool participation token, and DobProtocol's
 distribution/marketplace already carries the legal structure (SPV/claim, KYC/AML, geo-fencing) for
-holding and trading it. dobx does not re-solve this.
+holding and trading it. Conductors does not re-solve this.
 
 The **USDC-mediated conversion (§5) makes this clean.** Because there is **no on-chain convertible
 primitive** anymore — "convert" is just *sell A for USDC on the AMM, then buy B on the DobProtocol
@@ -226,7 +226,7 @@ What remains, and where it lives:
 | `AgentShareToken` (A) | ✅ built | fixed-supply ERC-20. A is *not* distributed over, so plain ERC-20 is fine (no snapshot needed). |
 | `AgentBondingCurve` + `AgentAMM` (A market) | ✅ built | audit-hardened: graduation seeds AMM at terminal price (no cliff), explicit reserves, gated + pausable launch, deadlines. |
 | **Distribution Token (B)** | ✅ external | the **DobProtocol pool participation token** — no new contract; B lives + trades (USDC) on DobProtocol's existing marketplace. Fixed supply, pull-based x402 yield. |
-| **Revenue router w/ split** | 🟡 partial | dobx BFF `payout.service` exists but must split `R_net` into `b%` buyback (fund `AgentBuyback`) + `d%` distribution (DobProtocol), bounded 10–50%, idempotent/authed. |
+| **Revenue router w/ split** | 🟡 partial | Conductors BFF `payout.service` exists but must split `R_net` into `b%` buyback (fund `AgentBuyback`) + `d%` distribution (DobProtocol), bounded 10–50%, idempotent/authed. |
 | **`AgentBuyback`** | ✅ built | TWAP/batched buyer of A → treasury; funded (USDC) by real revenue + trading fees; epoch spend cap + min interval; keeper-gated. Tests ✔. |
 | **`AgentTreasury`** | ✅ built | A permanently locked (no path out); B strategic reserve owner-deployable (marketplace backstop / incentives); routes USDC fees. Tests ✔. |
 | **`AgentConverter` (A→B step 1)** | ✅ built | sells A→USDC on the AMM, skims 0.5–1% fee to treasury, returns net USDC; **no oracle**. Step 2 (buy B) is the DobProtocol marketplace. Replaced the oracle-based `AgentConversion`. Tests ✔. |

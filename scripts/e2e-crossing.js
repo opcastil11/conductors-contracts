@@ -1,7 +1,7 @@
 /**
  * End-to-end exercise of the one-way crossing against a LIVE deployment.
  *
- * Unlike test/controller.test.js this talks to the real dobx BFF and a real network, so it also
+ * Unlike test/controller.test.js this talks to the real Conductors BFF and a real network, so it also
  * checks the seams the unit tests cannot see: that the API's managed signer owns the launchpad,
  * that its prepare-bundles are signable as-is, and that the ratio the UI advertises is the ratio
  * the contract actually pays.
@@ -13,11 +13,11 @@
  *   convert  — walk the BFF's convert bundle and assert what moved
  *
  * Every address comes from env so the script never assumes a particular deployment:
- *   AGENT=<dobx agent id> CURVE=… TOKEN=… CONTROLLER=… PT=… API=https://dobx.pro/api
+ *   AGENT=<Conductors agent id> CURVE=… TOKEN=… CONTROLLER=… PT=… API=https://conductors.io/api
  */
 const { ethers } = require("hardhat");
 
-const API = process.env.API || "https://dobx.pro/api";
+const API = process.env.API || "https://conductors.io/api";
 const AGENT = process.env.AGENT;
 
 const ERC20 = [

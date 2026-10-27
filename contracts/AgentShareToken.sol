@@ -5,7 +5,7 @@ import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 
 /**
  * @title AgentShareToken
- * @notice Product A — the tradeable ERC20 of a single dobx agent. Fixed supply, minted once to
+ * @notice Product A — the tradeable ERC20 of a single Conductors agent. Fixed supply, minted once to
  *         the bonding curve at launch, priced in DOBX.
  *
  * A does NOT receive distributions. Its link to the agent's real revenue is the RIGHT TO CONVERT
