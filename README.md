@@ -8,7 +8,6 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/opcastil11/conductors-contracts/actions/workflows/ci.yml"><img src="https://github.com/opcastil11/conductors-contracts/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <img src="https://img.shields.io/badge/Solidity-0.8.24-363636?logo=solidity" alt="Solidity 0.8.24">
   <img src="https://img.shields.io/badge/Hardhat-47%20tests-f7df1e" alt="Hardhat">
   <img src="https://img.shields.io/badge/Foundry-fuzz%20%2B%20invariants-1c1c1c" alt="Foundry">
