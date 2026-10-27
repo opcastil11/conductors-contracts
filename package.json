@@ -4,7 +4,7 @@
   "description": "dobx.pro smart contracts — per-agent fair launch (bonding curve → AMM graduation) and one-way conversion into real-world-asset revenue pools",
   "repository": {
     "type": "git",
-    "url": "https://github.com/opcastil11/conductos-contracts.git"
+    "url": "https://github.com/opcastil11/conductors-contracts.git"
   },
   "license": "MIT",
   "scripts": {

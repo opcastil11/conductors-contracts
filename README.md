@@ -1,4 +1,4 @@
-# conductos-contracts
+# conductors-contracts
 
 **On-chain layer of [dobx.pro](https://dobx.pro): a launchpad that gives every real-world-asset
 agent a fair-launched market token, and a one-way door from that token into the asset's revenue.**
@@ -117,8 +117,8 @@ The key and role model, threat analysis and pre-mainnet separation plan are in
 Requirements: Node.js 20+, and [Foundry](https://getfoundry.sh) for the fuzz suite.
 
 ```bash
-git clone --recurse-submodules https://github.com/opcastil11/conductos-contracts.git
-cd conductos-contracts
+git clone --recurse-submodules https://github.com/opcastil11/conductors-contracts.git
+cd conductors-contracts
 npm install
 npm run compile
 ```

@@ -13,7 +13,7 @@ Model reference: **[TOKENOMICS-V2.md](TOKENOMICS-V2.md)**.
 The repo has **no `.env`** on purpose (no key committed). To deploy you must supply a funded key.
 
 ```bash
-cd conductos-contracts
+cd conductors-contracts
 
 # 1. Fund a throwaway deployer wallet with Base Sepolia ETH
 #    (faucet: https://www.alchemy.com/faucets/base-sepolia).

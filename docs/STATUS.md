@@ -113,7 +113,7 @@ This is the honest list. Nothing here has an address or an endpoint.
 ## 6. How to reproduce
 
 ```bash
-cd conductos-contracts                       # .env with PRIVATE_KEY funded on Base Sepolia
+cd conductors-contracts                       # .env with PRIVATE_KEY funded on Base Sepolia
 npx hardhat run scripts/e2e-crossing.js   --network baseSepolia
 npx hardhat run scripts/e2e-grace.js      --network baseSepolia   # GRACE_SECONDS=180 by default
 npx hardhat run scripts/e2e-graduation.js --network baseSepolia   # SUPPLY/GRAD_RAISE/SHARES
