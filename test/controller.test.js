@@ -89,7 +89,11 @@ async function attachController(f, { activate = true, seedB = B_TOTAL } = {}) {
   const addr = (await f.launchpad.getLaunch(0)).controller;
   const controller = await ethers.getContractAt("AgentController", addr);
   if (seedB > 0n) await (await f.bToken.mint(addr, seedB)).wait();
-  if (activate) { await graduate(f); await (await f.launchpad.activateController(0, seedB)).wait(); }
+  if (activate) {
+    await graduate(f);
+    await (await f.launchpad.activateController(0, seedB)).wait();
+    await time.increase(3601n); // the conversion rate needs an hour of AMM history (TWAP)
+  }
   return controller;
 }
 
@@ -425,15 +429,40 @@ describe("Hardening — precision, reachability and fixed roles", () => {
     const all = (await f.share.balanceOf(f.alice.address)) / WAD;
     await (await convert(f, controller, f.alice, all / 3n)).wait();
     await (await convert(f, controller, f.alice, (await f.share.balanceOf(f.alice.address)) / WAD)).wait();
-    const cb = await controller.convertibleB();
-    expect(cb - (await controller.bConverted())).to.be.lt(cb / 10n ** 6n);
+    expect(await controller.bConverted()).to.equal(await controller.convertibleB());
+  });
+
+  it("waits for an hour of AMM history before quoting a rate", async () => {
+    const f = await deploy();
+    await attachController(f, { activate: false });
+    await graduate(f);
+    await (await f.launchpad.activateController(0, B_TOTAL)).wait();
+    const controller = await ethers.getContractAt("AgentController", (await f.launchpad.getLaunch(0)).controller);
+    await (await f.kyc.setApproved(f.alice.address, true)).wait();
+    await expect(convert(f, controller, f.alice, 100n)).to.be.revertedWith("twap warming");
+    await time.increase(3601n);
+    await expect(convert(f, controller, f.alice, 100n)).to.not.be.reverted;
+  });
+
+  it("a griefer who skews the average cannot trap B: the last conversion sweeps the rest", async () => {
+    const f = await deploy();
+    const controller = await attachController(f);
+    await (await f.kyc.setApproved(f.alice.address, true)).wait();
+    const amm = await ethers.getContractAt("AgentAMM", await f.curve.amm());
+    // bob buys A out of the pool, holds it for an hour, then sells it back.
+    await (await f.dobx.connect(f.bob).approve(await amm.getAddress(), ethers.MaxUint256)).wait();
+    await (await amm.connect(f.bob).swapQuoteForShare(10n ** 21n, 0n, DL)).wait();
+    await time.increase(3600n);
+    await (await f.share.connect(f.bob).approve(await amm.getAddress(), ethers.MaxUint256)).wait();
+    await (await amm.connect(f.bob).swapShareForQuote(await f.share.balanceOf(f.bob.address), 0n, DL)).wait();
+    await (await convert(f, controller, f.alice, (await f.share.balanceOf(f.alice.address)) / WAD)).wait();
+    expect(await controller.bConverted()).to.equal(await controller.convertibleB());
   });
 
   it("dumping A into the pool does not raise the rate; buying it out right before converting only lowers it", async () => {
     const f = await deploy();
     const controller = await attachController(f);
     await (await f.kyc.setApproved(f.alice.address, true)).wait();
-    await time.increase(7200n);
     await (await convert(f, controller, f.alice, 10n)).wait();
     await time.increase(7200n);
     const amm = await ethers.getContractAt("AgentAMM", await f.curve.amm());

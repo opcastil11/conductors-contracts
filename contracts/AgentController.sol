@@ -90,15 +90,11 @@ contract AgentController is ReentrancyGuard {
     // The rate is B still unconverted over A still outside the curve's pool position, recomputed
     // on every conversion. A fixed denominator counted the A the curve seeded into the AMM — burned
     // on conversion without ever claiming B — and left that share of B unreachable. The curve's
-    // position is valued at the LOWER of the AMM's spot and its time-weighted A per LP unit over at
-    // least TWAP_WINDOW: dumping A into the pool cannot raise the rate (the average barely moves),
-    // and buying A out of it right before converting only lowers it.
+    // position is valued at the LOWER of the AMM's spot and its 1-hour time-weighted A per LP unit
+    // (so the denominator is the larger, the rate the more conservative): dumping A into the pool
+    // cannot raise the rate and buying it out only lowers it. Whatever a conservative rate leaves
+    // behind is not lost: the conversion that leaves under one whole A outside takes all of it.
     uint64 public constant TWAP_WINDOW = 1 hours;
-    uint256 public aPerLpAtActivation;
-    uint256 private ckptCum;
-    uint64 private ckptTime;
-    uint256 private pendCum;
-    uint64 private pendTime;
 
     event Activated(uint256 totalB, uint256 convertibleB, uint256 retainedB, uint256 aSupply, uint64 graceEnd);
     event Converted(address indexed account, uint256 wholeSharesA, uint256 bOut, uint256 quoteToCapex);
@@ -166,10 +162,6 @@ contract AgentController is ReentrancyGuard {
         // Precision floor: one whole A must be worth ≥1e6 wei of B, so per-conversion rounding is negligible.
         require(convertibleB * 1e12 >= aSupply, "B too coarse");
         aSupplyAtActivation = aSupply;
-        AgentAMM pool = curve.amm();
-        aPerLpAtActivation = pool.aPerLpSpot();
-        ckptCum = pendCum = pool.aPerLpCumulativeNow();
-        ckptTime = pendTime = uint64(block.timestamp);
         graceEnd = uint64(block.timestamp) + graceSeconds;
         cliffEnd = uint64(block.timestamp) + cliffSeconds;
         vestEnd = cliffEnd + vestSeconds;
@@ -211,11 +203,11 @@ contract AgentController is ReentrancyGuard {
         require(address(kyc) == address(0) || kyc.isApproved(msg.sender), "kyc required");
 
         uint256 aIn = wholeShares * SHARE_UNIT;
-        _rotateCheckpoint();
-        (uint256 num, uint256 den) = conversionRate();
+        (uint256 num, uint256 den, uint256 denSpot) = _rate();
         require(den > 0, "no outstanding A");
         bOut = (aIn * num) / den;
-        if (bOut > num) bOut = num;
+        // Terminal sweep: this conversion leaves less than one whole A outside the curve's pool.
+        if (bOut > num || denSpot < aIn + SHARE_UNIT) bOut = num;
         require(bOut > 0, "dust");
         require(bOut >= minBOut, "slippage");
         require(bConverted + bOut <= convertibleB, "convertible exhausted");
@@ -238,37 +230,24 @@ contract AgentController is ReentrancyGuard {
         emit Converted(msg.sender, wholeShares, bOut, released);
     }
 
-    /// @dev Keeps a checkpoint of the AMM accumulator at least TWAP_WINDOW old.
-    function _rotateCheckpoint() internal {
-        if (block.timestamp - pendTime >= TWAP_WINDOW) {
-            (ckptCum, ckptTime) = (pendCum, pendTime);
-            pendCum = curve.amm().aPerLpCumulativeNow();
-            pendTime = uint64(block.timestamp);
-        }
-    }
-
-    /// @notice A per LP unit the curve's position is valued at: min(spot, average since a
-    ///         checkpoint at least TWAP_WINDOW old — or the activation value until one exists).
-    function effectiveAPerLp() public view returns (uint256) {
+    function _rate() internal view returns (uint256 num, uint256 den, uint256 denSpot) {
         AgentAMM pool = curve.amm();
+        uint256 lp = pool.liquidityBalance(address(curve));
+        uint256 supply = agentToken.totalSupply();
         uint256 spot = pool.aPerLpSpot();
-        uint256 avg = aPerLpAtActivation;
-        (uint256 cCum, uint64 cTime) = (ckptCum, ckptTime);
-        if (block.timestamp - pendTime >= TWAP_WINDOW) (cCum, cTime) = (pendCum, pendTime);
-        if (block.timestamp - cTime >= TWAP_WINDOW) {
-            avg = (pool.aPerLpCumulativeNow() - cCum) / (block.timestamp - cTime);
-        }
-        return spot < avg ? spot : avg;
+        uint256 avg = pool.twapAPerLp(TWAP_WINDOW);
+        uint256 low = spot < avg ? spot : avg;
+        uint256 curveSpot = (lp * spot) / 1e18;
+        uint256 curveLow = (lp * low) / 1e18;
+        denSpot = supply > curveSpot ? supply - curveSpot : 0;
+        den = supply > curveLow ? supply - curveLow : 0;
+        num = convertibleB - bConverted;
     }
 
     /// @notice The current B-per-A rate as (unconverted B, A outside the curve's pool position).
     function conversionRate() public view returns (uint256 num, uint256 den) {
         if (!activated) return (0, 0);
-        AgentAMM pool = curve.amm();
-        uint256 curveShares = (pool.liquidityBalance(address(curve)) * effectiveAPerLp()) / 1e18;
-        uint256 supply = agentToken.totalSupply();
-        den = supply > curveShares ? supply - curveShares : 0;
-        num = convertibleB - bConverted;
+        (num, den, ) = _rate();
     }
 
     /// @notice B delivered for `wholeShares` of A at the current rate.
@@ -276,7 +255,7 @@ contract AgentController is ReentrancyGuard {
         (uint256 num, uint256 den) = conversionRate();
         if (den == 0) return 0;
         uint256 out = (wholeShares * SHARE_UNIT * num) / den;
-        return out > num ? num : out;
+        return out > num ? num : out; // the terminal sweep is not quoted
     }
 
     // ─── Retained B: cliff + linear vesting, pull-based ─────────────────────────

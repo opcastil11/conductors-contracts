@@ -48,16 +48,33 @@ contract AgentAMM is ReentrancyGuard {
     uint256 public aPerLpCumulative;
     uint64 public lastAccrual;
 
+    // Ring of accumulator observations, at most one per OBS_SPACING, so the accumulator's value at
+    // any second of the last ~2 hours can be reconstructed (exactly, except within OBS_SPACING
+    // after an observation). Written by trades themselves — no keeper, no dependence on converts.
+    struct Observation { uint64 t; uint192 cum; uint256 spotBefore; }
+    uint256 public constant OBS_N = 128;
+    uint64 public constant OBS_SPACING = 60;
+    Observation[128] public observations;
+    uint256 public obsIndex;
+    uint256 public obsCount;
+
     modifier ensure(uint256 deadline) {
         require(block.timestamp <= deadline, "expired");
         _;
     }
 
     modifier snapshot() {
+        uint256 spot = aPerLpSpot();
         uint256 dt = block.timestamp - lastAccrual;
         if (dt > 0) {
-            if (totalLiquidity > 0) aPerLpCumulative += ((shareReserve * 1e18) / totalLiquidity) * dt;
+            aPerLpCumulative += spot * dt;
             lastAccrual = uint64(block.timestamp);
+        }
+        if (obsCount == 0 || block.timestamp - observations[obsIndex].t >= OBS_SPACING) {
+            uint256 i = obsCount == 0 ? 0 : (obsIndex + 1) % OBS_N;
+            observations[i] = Observation(uint64(block.timestamp), uint192(aPerLpCumulative), spot);
+            obsIndex = i;
+            if (obsCount < OBS_N) obsCount++;
         }
         _;
     }
@@ -191,8 +208,40 @@ contract AgentAMM is ReentrancyGuard {
     }
 
     /// @notice The time-weighted accumulator brought up to this second.
-    function aPerLpCumulativeNow() external view returns (uint256) {
+    function aPerLpCumulativeNow() public view returns (uint256) {
         return aPerLpCumulative + aPerLpSpot() * (block.timestamp - lastAccrual);
+    }
+
+    /// @notice The accumulator's value at past time `t` (reverts if older than the ring holds).
+    function cumulativeAt(uint256 t) public view returns (uint256) {
+        require(t <= block.timestamp, "future");
+        // No trade since t: the spot held over (t, now].
+        if (lastAccrual <= t) return aPerLpCumulativeNow() - aPerLpSpot() * (block.timestamp - t);
+        require(obsCount > 0, "no history");
+        Observation memory last = observations[obsIndex];
+        // Trades after t but no newer observation ⇒ t is within OBS_SPACING after `last`.
+        if (last.t <= t) return last.cum;
+        uint256 oldest = obsCount < OBS_N ? 0 : (obsIndex + 1) % OBS_N;
+        require(observations[oldest].t <= t, "twap warming");
+        // Largest logical j with observation.t ≤ t (the last one is known to be > t).
+        uint256 lo = 0;
+        uint256 hi = obsCount - 1;
+        while (lo + 1 < hi) {
+            uint256 mid = (lo + hi) / 2;
+            if (observations[(oldest + mid) % OBS_N].t <= t) lo = mid; else hi = mid;
+        }
+        Observation memory a = observations[(oldest + lo) % OBS_N];
+        Observation memory b = observations[(oldest + lo + 1) % OBS_N];
+        // Between a.t + OBS_SPACING and b.t nothing traded (it would have been observed), so the
+        // spot over that stretch is b.spotBefore. Inside the spacing, `a` is the closest exact value.
+        if (t >= a.t + OBS_SPACING) return b.cum - b.spotBefore * (b.t - t);
+        return a.cum;
+    }
+
+    /// @notice Time-weighted A per LP unit over the last `window` seconds.
+    function twapAPerLp(uint256 window) external view returns (uint256) {
+        require(window > 0, "window");
+        return (aPerLpCumulativeNow() - cumulativeAt(block.timestamp - window)) / window;
     }
 
     function getAmountOut(uint256 amountIn, uint256 reserveIn, uint256 reserveOut) external pure returns (uint256) {
