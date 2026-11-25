@@ -8,7 +8,7 @@ import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 /**
  * @title AgentAMM
  * @notice Constant-product AMM (x*y=k, 0.3% fee) for one agent's shares against the quote
- *         token (USDC). Post-graduation continuous market for Product A.
+ *         token (DAM, 18 dp). Post-graduation continuous market for Product A.
  *
  * Security-hardened vs the initial draft (audit fixes):
  *  - **Explicit reserves** (not balanceOf): swaps/liquidity update `shareReserve`/`quoteReserve`
@@ -19,7 +19,7 @@ import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
  *  - **Deadlines** on every state-changing op to bound MEV/held-tx execution.
  *  - MIN_LIQUIDITY permanently locked on first mint.
  *
- * The quote token MUST be a standard, non-fee-on-transfer, non-rebasing ERC20 (USDC). The
+ * The quote token MUST be a standard, non-fee-on-transfer, non-rebasing ERC20 (DAM). The
  * launchpad owner vets it; fee-on-transfer tokens would desync tracked reserves from balances.
  */
 contract AgentAMM is ReentrancyGuard {

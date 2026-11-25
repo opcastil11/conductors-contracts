@@ -14,8 +14,8 @@ import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
  *
  * The curve's `feeRecipient` is immutable, so the ratio lives here instead: the owner (the
  * platform) can move it within [MIN_AGENT_BPS, 10000] and re-point the platform payee; the agent
- * payee can be rotated by the agent itself or by the owner (the agent's custodied wallet may be
- * replaced). `release` is permissionless — anyone can push the accrued balance out at the ratio in
+ * payee can be rotated only by the agent itself (its custodied wallet, which may be
+ * rotated). `release` is permissionless — anyone can push the accrued balance out at the ratio in
  * force at that moment.
  *
  * The curve also sends its leftover A to the same address it uses as treasury; any token other

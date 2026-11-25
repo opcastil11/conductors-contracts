@@ -142,6 +142,8 @@ contract AgentController is ReentrancyGuard {
         require(!activated, "activated");
         require(totalB > 0, "no B");
         require(participationToken.balanceOf(address(this)) >= totalB, "B not here");
+        // The ratio is fixed on A's supply, which is only final once graduation burns the unsold A.
+        require(curve.graduated(), "not graduated");
         uint256 aSupply = agentToken.totalSupply();
         require(aSupply > 0, "no A");
 

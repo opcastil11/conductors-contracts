@@ -149,7 +149,13 @@ contract AgentBondingCurve is ReentrancyGuard {
 
         emit Bought(msg.sender, wholeShares, cost, fee, getCurrentPrice());
 
-        if (raised >= graduationRaise) _graduate();
+        if (raised >= graduationRaise) {
+            // The AMM must be seeded at the terminal price: if a buy overshoots so far that the
+            // inventory left cannot match the reserve at that price, the pool would open far above
+            // it and the first seller would take the others' reserve. Buy fewer shares instead.
+            require(raised / getCurrentPrice() <= curveSupply - sold - burned, "seed short");
+            _graduate();
+        }
     }
 
     function sell(uint256 wholeShares, uint256 minQuoteOut, uint256 deadline) external ensure(deadline) nonReentrant {
@@ -197,32 +203,25 @@ contract AgentBondingCurve is ReentrancyGuard {
         uint256 baseAmount = wholeShares * SHARE_UNIT;
         shareToken.safeTransferFrom(msg.sender, address(this), baseAmount);
 
-        if (!graduated) {
-            // Pre-graduation: release exactly the top-of-curve integral for these shares — the
-            // same arithmetic as a sell, so the remaining `sold` stay fully covered by `raised`.
-            require(wholeShares <= sold, "exceeds outstanding");
-            releasedQuote = _integralFrom(sold - wholeShares, wholeShares);
-            require(releasedQuote <= raised, "insufficient reserve");
-            sold -= wholeShares;
-            raised -= releasedQuote;
-            // Burning shrinks the buyable inventory; a conversion may not leave the goal out of reach.
-            require(raised + _integralFrom(sold, curveSupply - 1 - sold - (burned + wholeShares)) >= graduationRaise, "grad unreachable");
-        } else {
-            // Post-graduation: the reserve is the AMM's quote leg. Withdraw the same share of
-            // this curve's LP as the A being retired is of circulating A, and burn the share leg
-            // that comes back with it — quote-per-circulating-A is unchanged for everyone left.
-            // The AMM's tracked reserve, not its balanceOf: A donated to the pool is not part of
-            // the position and must not shrink `circulating` (which would inflate the release).
-            uint256 circulating = shareToken.totalSupply() - amm.shareReserve();
-            require(circulating >= baseAmount, "bad circulating");
-            uint256 lp = amm.liquidityBalance(address(this));
-            uint256 lpToRemove = (lp * baseAmount) / circulating;
-            if (lpToRemove > 0) {
-                (uint256 shareOut, uint256 quoteOut) =
-                    amm.removeLiquidity(lpToRemove, 0, minQuoteOut, block.timestamp);
-                releasedQuote = quoteOut;
-                if (shareOut > 0) AgentShareToken(address(shareToken)).burn(shareOut);
-            }
+        // The crossing opens only after graduation: pre-graduation burns would shrink the
+        // inventory that has to seed the AMM, and the supply the B ratio is fixed on is only
+        // final once the unsold A is burned.
+        require(graduated, "not graduated");
+        // The reserve is the AMM's quote leg. Withdraw the same share of this curve's LP as the
+        // A being retired is of the A outside that position, and burn the share leg that comes
+        // back — quote-per-outstanding-A is unchanged for everyone left. Only the curve's own
+        // slice of the pool's tracked reserve is excluded: A that third parties provide as LP is
+        // still theirs, and excluding it would inflate the release.
+        uint256 lp = amm.liquidityBalance(address(this));
+        uint256 curveShares = (amm.shareReserve() * lp) / amm.totalLiquidity();
+        uint256 outstanding = shareToken.totalSupply() - curveShares;
+        require(outstanding >= baseAmount, "bad circulating");
+        uint256 lpToRemove = (lp * baseAmount) / outstanding;
+        if (lpToRemove > 0) {
+            (uint256 shareOut, uint256 quoteOut) =
+                amm.removeLiquidity(lpToRemove, 0, minQuoteOut, block.timestamp);
+            releasedQuote = quoteOut;
+            if (shareOut > 0) AgentShareToken(address(shareToken)).burn(shareOut);
         }
 
         require(releasedQuote >= minQuoteOut, "slippage");
@@ -296,6 +295,7 @@ contract AgentBondingCurve is ReentrancyGuard {
 
     /// @notice Whole shares still available to buy on the curve.
     function inventory() external view returns (uint256) {
+        if (graduated) return 0;
         return curveSupply - sold - burned;
     }
 }

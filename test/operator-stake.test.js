@@ -73,8 +73,9 @@ describe("OperatorStake — bond + slash for revenue under-reporting", () => {
     await stake.connect(operator).stake(1_000n * E6);
     await expect(stake.connect(stranger).slash(1n, "x")).to.be.revertedWith("not attester");
     await expect(stake.connect(owner).slash(1n, "x")).to.be.revertedWith("not attester");
-    await expect(stake.connect(attester).slash(2_000n * E6, "too much")).to.be.revertedWith("bad amount");
-    await stake.connect(attester).slash(1_000n * E6, "attester slashes");
+    // Over-asking clamps to the stake, so a 1-wei withdrawal cannot dodge an exact-amount slash.
+    await stake.connect(attester).slash(2_000n * E6, "clamped");
+    expect(await stake.staked()).to.equal(0n);
     expect(await stake.staked()).to.equal(0n);
   });
 

@@ -118,7 +118,10 @@ contract OperatorStake is Ownable, ReentrancyGuard {
     ///         cancels any pending withdrawal: the operator must re-request (and re-wait) after it.
     function slash(uint256 amount, string calldata reason) external nonReentrant {
         require(msg.sender == attester, "not attester");
-        require(amount > 0 && amount <= staked, "bad amount");
+        require(amount > 0, "bad amount");
+        // Clamped, so an operator cannot dodge an exact-amount slash by withdrawing 1 wei first.
+        if (amount > staked) amount = staked;
+        require(amount > 0, "nothing staked");
         staked -= amount;
         _cancelPending();
         bondToken.safeTransfer(beneficiary, amount);

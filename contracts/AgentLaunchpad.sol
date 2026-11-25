@@ -93,8 +93,8 @@ contract AgentLaunchpad is Ownable, Pausable {
         string name;
         string symbol;
         uint256 supply;          // total share supply in WHOLE shares (minted x1e18)
-        uint256 basePrice;       // USDC base units per whole share at sold=0
-        uint256 slope;           // USDC base units added per whole share sold
+        uint256 basePrice;       // quote base units per whole share at sold=0
+        uint256 slope;           // quote base units added per whole share sold
         uint256 buyFeeBps;
         uint256 sellFeeBps;
         uint256 graduationRaise; // quote (net) that triggers curve → AMM graduation
@@ -289,15 +289,24 @@ contract AgentLaunchpad is Ownable, Pausable {
         emit ControllerActivated(agentId, controller, totalB);
     }
 
-    /// @dev Ensure graduation is reachable before the curve sells out (leaving inventory to seed
-    ///      the AMM). The curve itself clamps the seed to a valid range, so no tight lower bound
-    ///      is needed here — only that graduation triggers before the full integral is raised.
+    /// @dev Graduation must trigger with enough unsold A left to seed the AMM at the terminal
+    ///      price. Finds the first sold count `n` whose raise meets the goal (the raise depends
+    ///      only on `n`, and no pre-graduation path burns A) and requires the inventory left
+    ///      there to cover `raise / price` — the same check the curve's graduating buy enforces.
     function _validateGraduation(LaunchParams calldata p) internal pure {
-        // `buy` keeps ≥1 share back to seed the AMM, so at most supply−1 shares are ever sold.
         require(p.supply > 1, "grad unreachable");
-        uint256 k = p.supply - 1;
-        uint256 sellable = k * p.basePrice + (p.slope * (k - 1) * k) / 2;
-        require(p.graduationRaise <= sellable, "grad unreachable");
+        uint256 lo = 1;
+        uint256 hi = p.supply - 1;
+        require(_raise(p, hi) >= p.graduationRaise, "grad unreachable");
+        while (lo < hi) {
+            uint256 mid = (lo + hi) / 2;
+            if (_raise(p, mid) >= p.graduationRaise) hi = mid; else lo = mid + 1;
+        }
+        require(_raise(p, lo) / (p.basePrice + lo * p.slope) <= p.supply - lo, "grad too late");
+    }
+
+    function _raise(LaunchParams calldata p, uint256 k) private pure returns (uint256) {
+        return k * p.basePrice + (p.slope * (k - 1) * k) / 2;
     }
 
     // ─── Views ────────────────────────────────────────────────────────────────
