@@ -90,9 +90,9 @@ contract AgentController is ReentrancyGuard {
     // The rate is B still unconverted over A still outside the curve's pool position, recomputed
     // on every conversion. A fixed denominator counted the A the curve seeded into the AMM — burned
     // on conversion without ever claiming B — and left that share of B unreachable. The curve's
-    // position is valued at the AMM's spot, and a conversion is refused while that spot sits more
-    // than MAX_DEVIATION_BPS away from the 1-hour time-weighted value in either direction: moving
-    // the rate means moving the pool AND holding it there for an hour against arbitrage. The
+    // position is valued at the AMM's 1-hour time-weighted A per LP unit, and a conversion is
+    // refused while the spot sits more than MAX_DEVIATION_BPS away from it in either direction:
+    // moving the rate means moving the pool AND holding it there for an hour against arbitrage. The
     // conversion that leaves under one whole A outside takes whatever rounding left behind.
     uint64 public constant TWAP_WINDOW = 1 hours;
     uint256 public constant MAX_DEVIATION_BPS = 300;
@@ -238,7 +238,10 @@ contract AgentController is ReentrancyGuard {
         uint256 spot = pool.aPerLpSpot();
         uint256 avg = pool.twapAPerLp(TWAP_WINDOW);
         settled = spot * BPS <= avg * (BPS + MAX_DEVIATION_BPS) && spot * BPS >= avg * (BPS - MAX_DEVIATION_BPS);
-        uint256 curveShares = (pool.liquidityBalance(address(curve)) * spot) / 1e18;
+        // Valued at the hour's average, not the spot: moving the pool inside the band for one
+        // transaction moves the rate by nothing. The band itself stops a skewed average (a held
+        // buy-out unwound right before converting) from pricing anyone's conversion.
+        uint256 curveShares = (pool.liquidityBalance(address(curve)) * avg) / 1e18;
         den = supply > curveShares ? supply - curveShares : 0;
         num = convertibleB - bConverted;
     }
