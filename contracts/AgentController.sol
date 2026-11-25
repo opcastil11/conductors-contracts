@@ -91,8 +91,8 @@ contract AgentController is ReentrancyGuard {
     // on every conversion. A fixed denominator counted the A the curve seeded into the AMM — burned
     // on conversion without ever claiming B — and left that share of B unreachable. The curve's
     // position is valued both at the AMM's spot and at its 1-hour time-weighted A per LP unit and
-    // the lower rate is paid; a conversion is refused while the two denominators sit more than
-    // MAX_DEVIATION_BPS apart: moving the rate means moving the pool AND holding it for an hour. The
+    // the lower rate is paid; a conversion is refused while the spot sits more than
+    // MAX_DEVIATION_BPS from the average: moving the rate means moving the pool AND holding it. The
     // conversion that leaves under one whole A outside takes whatever rounding left behind.
     uint64 public constant TWAP_WINDOW = 1 hours;
     uint256 public constant MAX_DEVIATION_BPS = 300;
@@ -246,10 +246,11 @@ contract AgentController is ReentrancyGuard {
         // The larger denominator (the lower rate) of the two valuations: buying A out of the pool
         // right before converting cannot raise the rate, and neither can a skewed average.
         den = denSpot > denAvg ? denSpot : denAvg;
-        // The band is measured on the denominator itself — the quantity that prices B — so a move
-        // inside it shifts anyone's rate by at most MAX_DEVIATION_BPS, and only downward.
-        settled = denSpot * BPS <= denAvg * (BPS + MAX_DEVIATION_BPS)
-            && denSpot * BPS >= denAvg * (BPS - MAX_DEVIATION_BPS);
+        // The band is measured on the pool's A per LP unit, not on the denominator: the max above
+        // already stops anyone being paid over the fair rate, and the band only has to stop a
+        // skewed average from depressing someone else's. On the denominator a crashed A (most of
+        // it back in the pool) would let a trade of a fraction of a percent close the crossing.
+        settled = spot * BPS <= avg * (BPS + MAX_DEVIATION_BPS) && spot * BPS >= avg * (BPS - MAX_DEVIATION_BPS);
         num = convertibleB - bConverted;
     }
 
