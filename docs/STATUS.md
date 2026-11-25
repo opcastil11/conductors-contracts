@@ -1,6 +1,6 @@
 # Build status — what exists, where, and how it was verified
 
-> **Cutoff: 2026-08-09.** This document exists because [`TOKENOMICS-V2.md`](TOKENOMICS-V2.md) is
+> **Cutoff: 2026-08-09; §5 rows 1–3 revised 2026-11-24.** This document exists because [`TOKENOMICS-V2.md`](TOKENOMICS-V2.md) is
 > a *derivation* — it says what should happen — and until now there was no place that said what
 > **does** happen. When the two contradict each other, this one wins: the source of truth for this
 > file is addresses on Base Sepolia and responses from `https://conductors.io/api`, not the design.
@@ -100,9 +100,9 @@ This is the honest list. Nothing here has an address or an endpoint.
 
 | # | Missing | Why it matters |
 |---|---|---|
-| 1 | **The real DobProtocol pool as product B.** All E2E runs use `MockParticipation`. | The crossing is tested against a toy ERC-20. See `PUENTE.md` (private Conductors app repo): the V2 stack on Base **already exists**, it still needs to be wired in. |
-| 2 | **The x402 revenue circuit → pool → distribution.** | Without this B pays nothing and the A floor is theory. DOBI was down during the runs. |
-| 3 | **End-to-end KYC with a genuinely approved user.** | The 401 and the mirror are tested; the full happy path with a JWT approved by didit.me is missing. |
+| 1 | ~~**The real DobProtocol pool as product B.**~~ **Wired (2026-10-19).** `apumail` (`agt_120c7dc39ce14e5180a8`) has a real `DistributionPoolV2` `0x9638cC742cD08D2E406682d12Ff945675114f045` whose participation token `0x3c52b6FF90ab47F16B075d8396033EcBbE2f0391` is B, held by controller `0x6a0633894c6c46Cff8A16ae0e16155E075Ea09eC`. A conversion against it is still unexercised: its grace runs until ~2027-01-17. | The scripts in §3 still use `MockParticipation`. |
+| 2 | ~~**The x402 revenue circuit → pool → distribution.**~~ **Proven (2026-10-19/23).** x402 via `https://conductors.io/api/x/agt_120c7dc39ce14e5180a8/` pays the pool (tx `0x0c1d99b9…`), and distribution round 0 paid it out (tx `0x6456a6a6…`). `GET /agents/:id/revenue` and `/distributions` show both. | Volume is test traffic only. |
+| 3 | ~~**End-to-end KYC with a genuinely approved user.**~~ **Dropped (2026-11-24): KYC is not a Conductors requirement.** It belongs to DobProtocol's marketplace. The app's BFF (`CROSSING_KYC` unset) registers a holder in the controller's `KycRegistry` itself (it is the attestor), so controllers deployed with a registry still open; `CROSSING_KYC=required` restores the gate. | — |
 | 4 | **Mainnet.** Everything lives on Base Sepolia. | — |
 | 5 | **Key separation** (today a single key is deployer, owner, treasury, attestor and BFF signer). | See [`OPERATIONS.md`](OPERATIONS.md) §2 — it is the biggest operational risk. |
 | 6 | **Immutability of the `AgentController`** — decide and put it in writing. | §7.3-3 of TOKENOMICS-V2: if it is upgradeable without a timelock, it reopens everything it closes. |
