@@ -76,7 +76,7 @@ contract AgentController is ReentrancyGuard {
     bool public activated;
     uint256 public convertibleB;           // B reachable by converters
     uint256 public retainedB;              // B locked for the creator
-    uint256 public aSupplyAtActivation;    // denominator of the conversion ratio (fixed forever)
+    uint256 public aSupplyAtActivation;    // A's supply when the crossing opened (informational)
     uint64 public graceEnd;
     uint64 public cliffEnd;
     uint64 public vestEnd;
@@ -86,6 +86,14 @@ contract AgentController is ReentrancyGuard {
     uint256 public bReleased;      // B released to the creator so far
     uint256 public aBurned;        // whole A shares retired through this controller
     uint256 public capexFunded;    // quote forwarded to capexSink
+
+    // The rate is set once per block: B still unconverted over A still outside the curve's pool
+    // position, both read as they stood when the block began. A fixed denominator counted the A
+    // the curve seeded into the AMM — burned on conversion without ever claiming B — and left
+    // that share of B unreachable.
+    uint256 private rateBlock;
+    uint256 private rateNum;
+    uint256 private rateDen;
 
     event Activated(uint256 totalB, uint256 convertibleB, uint256 retainedB, uint256 aSupply, uint64 graceEnd);
     event Converted(address indexed account, uint256 wholeSharesA, uint256 bOut, uint256 quoteToCapex);
@@ -180,7 +188,13 @@ contract AgentController is ReentrancyGuard {
         require(address(kyc) == address(0) || kyc.isApproved(msg.sender), "kyc required");
 
         uint256 aIn = wholeShares * SHARE_UNIT;
-        bOut = (aIn * convertibleB) / aSupplyAtActivation;
+        if (rateBlock != block.number) {
+            (rateNum, rateDen) = conversionRate();
+            rateBlock = block.number;
+        }
+        require(rateDen > 0, "no outstanding A");
+        bOut = (aIn * rateNum) / rateDen;
+        if (bOut > convertibleB - bConverted) bOut = convertibleB - bConverted;
         require(bOut > 0, "dust");
         require(bConverted + bOut <= convertibleB, "convertible exhausted");
 
@@ -202,10 +216,26 @@ contract AgentController is ReentrancyGuard {
         emit Converted(msg.sender, wholeShares, bOut, released);
     }
 
-    /// @notice B delivered for `wholeShares` of A at the fixed activation ratio.
+    /// @notice The current B-per-A rate as (unconverted B, A outside the curve's pool position),
+    ///         from block-start pool state. Within a block that already converted, the rate fixed
+    ///         by its first conversion applies.
+    function conversionRate() public view returns (uint256 num, uint256 den) {
+        if (!activated) return (0, 0);
+        if (rateBlock == block.number) return (rateNum, rateDen);
+        AgentAMM pool = curve.amm();
+        (uint256 shareRes, uint256 totalLiq) = pool.blockStartState();
+        uint256 curveShares = totalLiq == 0 ? 0 : (shareRes * pool.liquidityBalance(address(curve))) / totalLiq;
+        uint256 supply = agentToken.totalSupply();
+        den = supply > curveShares ? supply - curveShares : 0;
+        num = convertibleB - bConverted;
+    }
+
+    /// @notice B delivered for `wholeShares` of A at the current rate.
     function quoteConversion(uint256 wholeShares) external view returns (uint256) {
-        if (!activated) return 0;
-        return (wholeShares * SHARE_UNIT * convertibleB) / aSupplyAtActivation;
+        (uint256 num, uint256 den) = conversionRate();
+        if (den == 0) return 0;
+        uint256 out = (wholeShares * SHARE_UNIT * num) / den;
+        return out > num ? num : out;
     }
 
     // ─── Retained B: cliff + linear vesting, pull-based ─────────────────────────

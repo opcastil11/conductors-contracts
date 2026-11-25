@@ -41,8 +41,23 @@ contract AgentAMM is ReentrancyGuard {
     event LiquidityRemoved(address indexed provider, uint256 shareAmount, uint256 quoteAmount, uint256 liquidity);
     event Swap(address indexed user, address tokenIn, uint256 amountIn, uint256 amountOut);
 
+    // Reserves as they stood when this block began. Read by the A→B crossing, whose rate depends
+    // on how much A sits in the pool: a same-block swap must not be able to move it.
+    uint256 private snapBlock;
+    uint256 private snapShareReserve;
+    uint256 private snapTotalLiquidity;
+
     modifier ensure(uint256 deadline) {
         require(block.timestamp <= deadline, "expired");
+        _;
+    }
+
+    modifier snapshot() {
+        if (block.number != snapBlock) {
+            snapBlock = block.number;
+            snapShareReserve = shareReserve;
+            snapTotalLiquidity = totalLiquidity;
+        }
         _;
     }
 
@@ -65,7 +80,7 @@ contract AgentAMM is ReentrancyGuard {
         uint256 shareMin,
         uint256 quoteMin,
         uint256 deadline
-    ) external ensure(deadline) nonReentrant returns (uint256 liquidity, uint256 shareUsed, uint256 quoteUsed) {
+    ) external ensure(deadline) nonReentrant snapshot returns (uint256 liquidity, uint256 shareUsed, uint256 quoteUsed) {
         require(shareDesired > 0 && quoteDesired > 0, "amounts>0");
 
         if (totalLiquidity == 0) {
@@ -106,6 +121,7 @@ contract AgentAMM is ReentrancyGuard {
         external
         ensure(deadline)
         nonReentrant
+        snapshot
         returns (uint256 shareAmount, uint256 quoteAmount)
     {
         require(liquidity > 0 && liquidityBalance[msg.sender] >= liquidity, "bad liquidity");
@@ -132,6 +148,7 @@ contract AgentAMM is ReentrancyGuard {
         external
         ensure(deadline)
         nonReentrant
+        snapshot
         returns (uint256 quoteOut)
     {
         require(shareIn > 0, "in>0");
@@ -150,6 +167,7 @@ contract AgentAMM is ReentrancyGuard {
         external
         ensure(deadline)
         nonReentrant
+        snapshot
         returns (uint256 shareOut)
     {
         require(quoteIn > 0, "in>0");
@@ -165,6 +183,12 @@ contract AgentAMM is ReentrancyGuard {
     }
 
     // ─── Views ────────────────────────────────────────────────────────────────
+
+    /// @notice `shareReserve` and `totalLiquidity` as of the start of the current block.
+    function blockStartState() external view returns (uint256 shareRes, uint256 totalLiq) {
+        if (snapBlock == block.number) return (snapShareReserve, snapTotalLiquidity);
+        return (shareReserve, totalLiquidity);
+    }
 
     function getAmountOut(uint256 amountIn, uint256 reserveIn, uint256 reserveOut) external pure returns (uint256) {
         return _getAmountOut(amountIn, reserveIn, reserveOut);

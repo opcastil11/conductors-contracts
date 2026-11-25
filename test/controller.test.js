@@ -207,7 +207,10 @@ describe("AgentController — the crossing opens only after graduation", () => {
     const f = await deploy({ retainedBps: 5000n });
     const controller = await attachController(f);
     await (await f.kyc.setApproved(f.alice.address, true)).wait();
-    const per1k = (1_000n * WAD * (await controller.convertibleB())) / (await controller.aSupplyAtActivation());
+    const [num, den] = await controller.conversionRate();
+    expect(num).to.equal(await controller.convertibleB());
+    expect(den).to.be.lt(await controller.aSupplyAtActivation()); // the curve's AMM-side A is excluded
+    const per1k = (1_000n * WAD * num) / den;
     expect(await controller.quoteConversion(1_000n)).to.equal(per1k);
     await (await convert(f, controller, f.alice, 1_000n)).wait();
     expect(await f.bToken.balanceOf(f.alice.address)).to.equal(per1k);
@@ -415,6 +418,36 @@ describe("Hardening — activation, launch params and owner bounds", () => {
 });
 
 describe("Hardening — precision, reachability and fixed roles", () => {
+  it("lets the holders of every A outside the curve's pool reach all the convertible B", async () => {
+    const f = await deploy();
+    const controller = await attachController(f);
+    await (await f.kyc.setApproved(f.alice.address, true)).wait();
+    const all = (await f.share.balanceOf(f.alice.address)) / WAD;
+    await (await convert(f, controller, f.alice, all / 3n)).wait();
+    await (await convert(f, controller, f.alice, (await f.share.balanceOf(f.alice.address)) / WAD)).wait();
+    const cb = await controller.convertibleB();
+    expect(cb - (await controller.bConverted())).to.be.lt(cb / 10n ** 6n);
+  });
+
+  it("a swap in the same block cannot move the conversion rate", async () => {
+    const f = await deploy();
+    const controller = await attachController(f);
+    await (await f.kyc.setApproved(f.alice.address, true)).wait();
+    await (await convert(f, controller, f.alice, 10n)).wait(); // mines a block; rate reads current state
+    const amm = await ethers.getContractAt("AgentAMM", await f.curve.amm());
+    const fair = await controller.quoteConversion(1_000n);
+    await (await f.share.connect(f.alice).approve(await amm.getAddress(), ethers.MaxUint256)).wait();
+    await (await f.share.connect(f.alice).approve(await controller.getAddress(), ethers.MaxUint256)).wait();
+    const before = await f.bToken.balanceOf(f.alice.address);
+    await ethers.provider.send("evm_setAutomine", [false]);
+    // Dump A into the pool to shrink "outside" A, then convert in the same block.
+    await amm.connect(f.alice).swapShareForQuote(2_000n * WAD, 0n, DL);
+    await controller.connect(f.alice).convert(1_000n, 0n);
+    await ethers.provider.send("evm_mine", []);
+    await ethers.provider.send("evm_setAutomine", [true]);
+    expect((await f.bToken.balanceOf(f.alice.address)) - before).to.equal(fair);
+  });
+
   it("refuses to activate on B too coarse to split per whole A", async () => {
     const f = await deploy();
     await attachController(f, { activate: false, seedB: 1000n });
