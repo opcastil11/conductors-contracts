@@ -4,6 +4,7 @@ pragma solidity ^0.8.24;
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/math/SafeCast.sol";
 
 /**
  * @title AgentAMM
@@ -72,7 +73,7 @@ contract AgentAMM is ReentrancyGuard {
         }
         if (obsCount == 0 || block.timestamp - observations[obsIndex].t >= OBS_SPACING) {
             uint256 i = obsCount == 0 ? 0 : (obsIndex + 1) % OBS_N;
-            observations[i] = Observation(uint64(block.timestamp), uint192(aPerLpCumulative), spot);
+            observations[i] = Observation(uint64(block.timestamp), SafeCast.toUint192(aPerLpCumulative), spot);
             obsIndex = i;
             if (obsCount < OBS_N) obsCount++;
         }

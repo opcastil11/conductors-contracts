@@ -90,11 +90,12 @@ contract AgentController is ReentrancyGuard {
     // The rate is B still unconverted over A still outside the curve's pool position, recomputed
     // on every conversion. A fixed denominator counted the A the curve seeded into the AMM — burned
     // on conversion without ever claiming B — and left that share of B unreachable. The curve's
-    // position is valued at the LOWER of the AMM's spot and its 1-hour time-weighted A per LP unit
-    // (so the denominator is the larger, the rate the more conservative): dumping A into the pool
-    // cannot raise the rate and buying it out only lowers it. Whatever a conservative rate leaves
-    // behind is not lost: the conversion that leaves under one whole A outside takes all of it.
+    // position is valued at the AMM's spot, and a conversion is refused while that spot sits more
+    // than MAX_DEVIATION_BPS away from the 1-hour time-weighted value in either direction: moving
+    // the rate means moving the pool AND holding it there for an hour against arbitrage. The
+    // conversion that leaves under one whole A outside takes whatever rounding left behind.
     uint64 public constant TWAP_WINDOW = 1 hours;
+    uint256 public constant MAX_DEVIATION_BPS = 300;
 
     event Activated(uint256 totalB, uint256 convertibleB, uint256 retainedB, uint256 aSupply, uint64 graceEnd);
     event Converted(address indexed account, uint256 wholeSharesA, uint256 bOut, uint256 quoteToCapex);
@@ -203,11 +204,12 @@ contract AgentController is ReentrancyGuard {
         require(address(kyc) == address(0) || kyc.isApproved(msg.sender), "kyc required");
 
         uint256 aIn = wholeShares * SHARE_UNIT;
-        (uint256 num, uint256 den, uint256 denSpot) = _rate();
+        (uint256 num, uint256 den, bool settled) = _rate();
+        require(settled, "pool unsettled");
         require(den > 0, "no outstanding A");
         bOut = (aIn * num) / den;
         // Terminal sweep: this conversion leaves less than one whole A outside the curve's pool.
-        if (bOut > num || denSpot < aIn + SHARE_UNIT) bOut = num;
+        if (bOut > num || den < aIn + SHARE_UNIT) bOut = num;
         require(bOut > 0, "dust");
         require(bOut >= minBOut, "slippage");
         require(bConverted + bOut <= convertibleB, "convertible exhausted");
@@ -230,18 +232,20 @@ contract AgentController is ReentrancyGuard {
         emit Converted(msg.sender, wholeShares, bOut, released);
     }
 
-    function _rate() internal view returns (uint256 num, uint256 den, uint256 denSpot) {
+    function _rate() internal view returns (uint256 num, uint256 den, bool settled) {
         AgentAMM pool = curve.amm();
-        uint256 lp = pool.liquidityBalance(address(curve));
         uint256 supply = agentToken.totalSupply();
         uint256 spot = pool.aPerLpSpot();
         uint256 avg = pool.twapAPerLp(TWAP_WINDOW);
-        uint256 low = spot < avg ? spot : avg;
-        uint256 curveSpot = (lp * spot) / 1e18;
-        uint256 curveLow = (lp * low) / 1e18;
-        denSpot = supply > curveSpot ? supply - curveSpot : 0;
-        den = supply > curveLow ? supply - curveLow : 0;
+        settled = spot * BPS <= avg * (BPS + MAX_DEVIATION_BPS) && spot * BPS >= avg * (BPS - MAX_DEVIATION_BPS);
+        uint256 curveShares = (pool.liquidityBalance(address(curve)) * spot) / 1e18;
+        den = supply > curveShares ? supply - curveShares : 0;
         num = convertibleB - bConverted;
+    }
+
+    /// @notice Whether a conversion would be accepted now (spot within MAX_DEVIATION_BPS of the TWAP).
+    function poolSettled() external view returns (bool settled) {
+        (, , settled) = _rate();
     }
 
     /// @notice The current B-per-A rate as (unconverted B, A outside the curve's pool position).

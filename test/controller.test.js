@@ -445,40 +445,42 @@ describe("Hardening — precision, reachability and fixed roles", () => {
     await expect(convert(f, controller, f.alice, 100n)).to.not.be.reverted;
   });
 
-  it("a griefer who skews the average cannot trap B: the last conversion sweeps the rest", async () => {
+  it("a griefer who skews the average cannot trap or divert B: conversion waits until the pool settles", async () => {
     const f = await deploy();
     const controller = await attachController(f);
     await (await f.kyc.setApproved(f.alice.address, true)).wait();
     const amm = await ethers.getContractAt("AgentAMM", await f.curve.amm());
+    const fair = await controller.quoteConversion(1_000n);
     // bob buys A out of the pool, holds it for an hour, then sells it back.
     await (await f.dobx.connect(f.bob).approve(await amm.getAddress(), ethers.MaxUint256)).wait();
     await (await amm.connect(f.bob).swapQuoteForShare(10n ** 21n, 0n, DL)).wait();
     await time.increase(3600n);
     await (await f.share.connect(f.bob).approve(await amm.getAddress(), ethers.MaxUint256)).wait();
     await (await amm.connect(f.bob).swapShareForQuote(await f.share.balanceOf(f.bob.address), 0n, DL)).wait();
+    expect(await controller.poolSettled()).to.equal(false);
+    await expect(convert(f, controller, f.alice, 1_000n)).to.be.revertedWith("pool unsettled");
+    await time.increase(3600n);
+    expect(await controller.poolSettled()).to.equal(true);
+    expect(await controller.quoteConversion(1_000n)).to.be.closeTo(fair, fair / 1000n);
     await (await convert(f, controller, f.alice, (await f.share.balanceOf(f.alice.address)) / WAD)).wait();
     expect(await controller.bConverted()).to.equal(await controller.convertibleB());
   });
 
-  it("dumping A into the pool does not raise the rate; buying it out right before converting only lowers it", async () => {
+  it("refuses to convert while the spot is pushed away from the hour's average in either direction", async () => {
     const f = await deploy();
     const controller = await attachController(f);
     await (await f.kyc.setApproved(f.alice.address, true)).wait();
-    await (await convert(f, controller, f.alice, 10n)).wait();
-    await time.increase(7200n);
     const amm = await ethers.getContractAt("AgentAMM", await f.curve.amm());
-    const fair = await controller.quoteConversion(1_000n);
+    const snap = await ethers.provider.send("evm_snapshot", []);
     await (await f.share.connect(f.alice).approve(await amm.getAddress(), ethers.MaxUint256)).wait();
-    // Cross-block: dump, let a block (and a minute) pass, then quote.
-    await (await amm.connect(f.alice).swapShareForQuote(2_000n * WAD, 0n, DL)).wait();
+    await (await amm.connect(f.alice).swapShareForQuote(2_000n * WAD, 0n, DL)).wait(); // dump
     await time.increase(60n);
-    // A minute of the dumped spot is 1/60 of the hour: the rate moves by a sliver, not the dump.
-    expect(await controller.quoteConversion(1_000n)).to.be.lte(fair + fair / 100n);
-    // Buying A out of the pool lowers the spot leg, so the rate can only go down.
-    const q = await amm.quoteForShare(1_000n * WAD).catch(() => 0n);
+    await expect(convert(f, controller, f.alice, 10n)).to.be.revertedWith("pool unsettled");
+    await ethers.provider.send("evm_revert", [snap]);
     await (await f.dobx.connect(f.alice).approve(await amm.getAddress(), ethers.MaxUint256)).wait();
-    await (await amm.connect(f.alice).swapQuoteForShare(10n ** 21n, 0n, DL)).wait();
-    expect(await controller.quoteConversion(1_000n)).to.be.lt(fair);
+    await (await amm.connect(f.alice).swapQuoteForShare(10n ** 21n, 0n, DL)).wait(); // buy-out
+    await time.increase(60n);
+    await expect(convert(f, controller, f.alice, 10n)).to.be.revertedWith("pool unsettled");
   });
 
   it("convertWithLimits enforces the B floor and the deadline", async () => {
