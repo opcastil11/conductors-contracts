@@ -103,6 +103,8 @@ describe("DOBX — the quote token of every curve", () => {
     expect(await dobx.totalSupply()).to.equal(10n ** 9n * WAD);
     expect(await dobx.balanceOf(owner.address)).to.equal(10n ** 9n * WAD);
     expect(dobx.interface.fragments.some((fr) => fr.name === "mint")).to.equal(false);
+    expect(await dobx.symbol()).to.equal("DAM");
+    expect(await dobx.name()).to.equal("DAM");
   });
 
   it("only ever shrinks: burn reduces total supply", async () => {

@@ -34,7 +34,7 @@ contract DOBX is ERC20 {
      * @param treasury receives the entire supply; distribution/vesting is handled off-contract
      *                 so this token stays free of privileged roles.
      */
-    constructor(address treasury) ERC20("dobx", "DOBX") {
+    constructor(address treasury) ERC20("DAM", "DAM") {
         require(treasury != address(0), "treasury=0");
         _mint(treasury, INITIAL_SUPPLY);
     }
