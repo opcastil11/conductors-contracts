@@ -450,3 +450,34 @@ describe("Hardening — activation, launch params and owner bounds", () => {
     expect(await controller.capexFunded()).to.equal(clean);
   });
 });
+
+describe("Hardening — precision, reachability and fixed roles", () => {
+  it("refuses to activate on B too coarse to split per whole A", async () => {
+    const f = await deploy();
+    await attachController(f, { activate: false, seedB: 1000n });
+    await expect(f.launchpad.activateController(0, 1000n)).to.be.revertedWith("B too coarse");
+  });
+
+  it("validates graduation against the supply−1 shares that can actually be sold", async () => {
+    const f = await deploy();
+    const base = {
+      name: "X", symbol: "X", supply: SUPPLY, basePrice: BASE_PRICE, slope: SLOPE,
+      buyFeeBps: BUY_FEE, sellFeeBps: SELL_FEE, creator: f.creator.address, feeRecipient: ethers.ZeroAddress,
+    };
+    await expect(f.launchpad.launch({ ...base, graduationRaise: integral(0n, SUPPLY) })).to.be.revertedWith("grad unreachable");
+    await (await f.launchpad.launch({ ...base, graduationRaise: integral(0n, SUPPLY - 1n) })).wait();
+  });
+
+  it("a pre-graduation conversion may not leave the goal out of reach", async () => {
+    const f = await deploy({ gradRaise: integral(0n, SUPPLY - 1n) });
+    const controller = await attachController(f);
+    await buy(f, f.alice, 10n);
+    await (await f.kyc.setApproved(f.alice.address, true)).wait();
+    await expect(convert(f, controller, f.alice, 1n)).to.be.revertedWith("grad unreachable");
+  });
+
+  it("the quote token is fixed for the launchpad's life", async () => {
+    const f = await deploy();
+    expect(f.launchpad.interface.fragments.some((fr) => fr.name === "setQuoteToken")).to.equal(false);
+  });
+});
