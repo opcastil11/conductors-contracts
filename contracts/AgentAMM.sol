@@ -214,14 +214,19 @@ contract AgentAMM is ReentrancyGuard {
     }
 
     /// @notice The accumulator's value at past time `t` (reverts if older than the ring holds).
-    function cumulativeAt(uint256 t) public view returns (uint256) {
+    function cumulativeAt(uint256 t) public view returns (uint256 cum) {
+        (cum, ) = _cumulativeAt(t);
+    }
+
+    /// @dev The accumulator at the latest instant ≤ t whose value is known exactly, and that instant.
+    function _cumulativeAt(uint256 t) internal view returns (uint256, uint256) {
         require(t <= block.timestamp, "future");
         // No trade since t: the spot held over (t, now].
-        if (lastAccrual <= t) return aPerLpCumulativeNow() - aPerLpSpot() * (block.timestamp - t);
+        if (lastAccrual <= t) return (aPerLpCumulativeNow() - aPerLpSpot() * (block.timestamp - t), t);
         require(obsCount > 0, "no history");
         Observation memory last = observations[obsIndex];
         // Trades after t but no newer observation ⇒ t is within OBS_SPACING after `last`.
-        if (last.t <= t) return last.cum;
+        if (last.t <= t) return (last.cum, last.t);
         uint256 oldest = obsCount < OBS_N ? 0 : (obsIndex + 1) % OBS_N;
         require(observations[oldest].t <= t, "twap warming");
         // Largest logical j with observation.t ≤ t (the last one is known to be > t).
@@ -235,14 +240,17 @@ contract AgentAMM is ReentrancyGuard {
         Observation memory b = observations[(oldest + lo + 1) % OBS_N];
         // Between a.t + OBS_SPACING and b.t nothing traded (it would have been observed), so the
         // spot over that stretch is b.spotBefore. Inside the spacing, `a` is the closest exact value.
-        if (t >= a.t + OBS_SPACING) return b.cum - b.spotBefore * (b.t - t);
-        return a.cum;
+        if (t >= a.t + OBS_SPACING) return (b.cum - b.spotBefore * (b.t - t), t);
+        return (a.cum, a.t);
     }
 
     /// @notice Time-weighted A per LP unit over the last `window` seconds.
     function twapAPerLp(uint256 window) external view returns (uint256) {
         require(window > 0, "window");
-        return (aPerLpCumulativeNow() - cumulativeAt(block.timestamp - window)) / window;
+        // Divide by the time actually covered: when the window's start falls just after an
+        // observation, the average runs from that observation (≤ OBS_SPACING longer), unbiased.
+        (uint256 cum, uint256 from) = _cumulativeAt(block.timestamp - window);
+        return (aPerLpCumulativeNow() - cum) / (block.timestamp - from);
     }
 
     function getAmountOut(uint256 amountIn, uint256 reserveIn, uint256 reserveOut) external pure returns (uint256) {

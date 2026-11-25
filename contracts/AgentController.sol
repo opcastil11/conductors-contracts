@@ -90,9 +90,9 @@ contract AgentController is ReentrancyGuard {
     // The rate is B still unconverted over A still outside the curve's pool position, recomputed
     // on every conversion. A fixed denominator counted the A the curve seeded into the AMM — burned
     // on conversion without ever claiming B — and left that share of B unreachable. The curve's
-    // position is valued at the AMM's 1-hour time-weighted A per LP unit, and a conversion is
-    // refused while the spot sits more than MAX_DEVIATION_BPS away from it in either direction:
-    // moving the rate means moving the pool AND holding it there for an hour against arbitrage. The
+    // position is valued both at the AMM's spot and at its 1-hour time-weighted A per LP unit and
+    // the lower rate is paid; a conversion is refused while the two denominators sit more than
+    // MAX_DEVIATION_BPS apart: moving the rate means moving the pool AND holding it for an hour. The
     // conversion that leaves under one whole A outside takes whatever rounding left behind.
     uint64 public constant TWAP_WINDOW = 1 hours;
     uint256 public constant MAX_DEVIATION_BPS = 300;
@@ -160,8 +160,9 @@ contract AgentController is ReentrancyGuard {
         activated = true;
         retainedB = (totalB * retainedBps) / BPS;
         convertibleB = totalB - retainedB;
-        // Precision floor: one whole A must be worth ≥1e6 wei of B, so per-conversion rounding is negligible.
-        require(convertibleB * 1e12 >= aSupply, "B too coarse");
+        // Precision floor: at least one B unit per whole A (B is a 0-decimal token). A conversion
+        // loses under one B unit to rounding, and the terminal sweep hands the remainder out.
+        require(convertibleB * SHARE_UNIT >= aSupply, "B too coarse");
         aSupplyAtActivation = aSupply;
         graceEnd = uint64(block.timestamp) + graceSeconds;
         cliffEnd = uint64(block.timestamp) + cliffSeconds;
@@ -237,12 +238,18 @@ contract AgentController is ReentrancyGuard {
         uint256 supply = agentToken.totalSupply();
         uint256 spot = pool.aPerLpSpot();
         uint256 avg = pool.twapAPerLp(TWAP_WINDOW);
-        settled = spot * BPS <= avg * (BPS + MAX_DEVIATION_BPS) && spot * BPS >= avg * (BPS - MAX_DEVIATION_BPS);
-        // Valued at the hour's average, not the spot: moving the pool inside the band for one
-        // transaction moves the rate by nothing. The band itself stops a skewed average (a held
-        // buy-out unwound right before converting) from pricing anyone's conversion.
-        uint256 curveShares = (pool.liquidityBalance(address(curve)) * avg) / 1e18;
-        den = supply > curveShares ? supply - curveShares : 0;
+        uint256 lp = pool.liquidityBalance(address(curve));
+        uint256 curveSpot = (lp * spot) / 1e18;
+        uint256 curveAvg = (lp * avg) / 1e18;
+        uint256 denSpot = supply > curveSpot ? supply - curveSpot : 0;
+        uint256 denAvg = supply > curveAvg ? supply - curveAvg : 0;
+        // The larger denominator (the lower rate) of the two valuations: buying A out of the pool
+        // right before converting cannot raise the rate, and neither can a skewed average.
+        den = denSpot > denAvg ? denSpot : denAvg;
+        // The band is measured on the denominator itself — the quantity that prices B — so a move
+        // inside it shifts anyone's rate by at most MAX_DEVIATION_BPS, and only downward.
+        settled = denSpot * BPS <= denAvg * (BPS + MAX_DEVIATION_BPS)
+            && denSpot * BPS >= denAvg * (BPS - MAX_DEVIATION_BPS);
         num = convertibleB - bConverted;
     }
 
