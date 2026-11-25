@@ -546,7 +546,26 @@ describe("Hardening — precision, reachability and fixed roles", () => {
     expect(d * 100n / clean).to.be.lt(5n);
   });
 
-  it("settles even if nobody claims for long, skipping the capex floor after the grace day", async () => {
+  it("a batch waits while the pool sits off its averages, and settles once they agree", async () => {
+    const f = await deploy();
+    const controller = await attachController(f);
+    await (await f.kyc.setApproved(f.alice.address, true)).wait();
+    const amm = await ethers.getContractAt("AgentAMM", await f.curve.amm());
+    const id = await request(f, controller, f.alice, 1_000n);
+    await time.increase(COLLECT);
+    await (await controller.poke()).wait();
+    await time.increase(PRICING);
+    await (await f.dobx.connect(f.bob).approve(await amm.getAddress(), ethers.MaxUint256)).wait();
+    await (await amm.connect(f.bob).swapQuoteForShare(10n ** 21n, 0n, DL)).wait();
+    await (await controller.poke()).wait();
+    expect((await controller.batches(id)).settled).to.equal(false);
+    await expect(controller.connect(f.alice).claim(id)).to.be.revertedWith("not settled");
+    await time.increase(DAY + 1n);
+    await (await controller.connect(f.alice).claim(id)).wait();
+    expect(await f.bToken.balanceOf(f.alice.address)).to.be.gt(0n);
+  });
+
+  it("settles even if nobody claims for long, with a wider capex floor after the grace day", async () => {
     const f = await deploy();
     const controller = await attachController(f);
     await (await f.kyc.setApproved(f.alice.address, true)).wait();

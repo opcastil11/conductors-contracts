@@ -44,6 +44,9 @@ contract OperatorStake is Ownable, ReentrancyGuard {
     // The attester can hold a matured withdrawal while it builds a slash case, for at most
     // MAX_FREEZE per freeze; a new cooldown applies only after COOLDOWN_DELAY of notice.
     uint256 public constant MAX_FREEZE = 30 days;
+    // Total freeze time the attester can add against one withdrawal request (reset by a new one).
+    uint256 public constant MAX_FREEZE_TOTAL = 90 days;
+    uint256 public freezeUsed;
     uint256 public constant COOLDOWN_DELAY = 7 days;
     uint256 public frozenUntil;
     uint256 public pendingCooldown;
@@ -99,6 +102,7 @@ contract OperatorStake is Ownable, ReentrancyGuard {
         require(amount > 0 && amount <= staked, "bad amount");
         pendingAmount = amount;
         unlockAt = block.timestamp + cooldown;
+        freezeUsed = 0;
         emit WithdrawRequested(amount, unlockAt);
     }
 
@@ -155,15 +159,23 @@ contract OperatorStake is Ownable, ReentrancyGuard {
         emit AttesterUpdated(attester);
     }
 
-    /// @notice Hold withdrawals for up to MAX_FREEZE while a slash is prepared (0 lifts it). A
-    ///         pending request keeps its maturity; if the freeze outlasts its window it re-arms
-    ///         from the end of the freeze, so freezing never forfeits the operator's request.
+    /// @notice Hold withdrawals for up to MAX_FREEZE while a slash is prepared (0 lifts it), with
+    ///         at most MAX_FREEZE_TOTAL added against one request. A live pending request keeps its
+    ///         maturity; if the freeze outlasts its window it re-arms from the end of the freeze, so
+    ///         freezing never forfeits it. A request that already lapsed is never revived.
     function freeze(uint256 duration, string calldata reason) external {
         require(msg.sender == attester, "not attester");
         require(duration <= MAX_FREEZE, "freeze too long");
-        frozenUntil = block.timestamp + duration;
-        if (unlockAt != 0 && unlockAt + WITHDRAW_WINDOW < frozenUntil) unlockAt = frozenUntil;
-        emit Frozen(frozenUntil, reason);
+        uint256 until = block.timestamp + duration;
+        uint256 from = frozenUntil > block.timestamp ? frozenUntil : block.timestamp;
+        if (until > from) {
+            freezeUsed += until - from;
+            require(freezeUsed <= MAX_FREEZE_TOTAL, "freeze budget");
+        }
+        bool live = unlockAt != 0 && block.timestamp <= unlockAt + WITHDRAW_WINDOW;
+        frozenUntil = until;
+        if (live && duration > 0 && unlockAt + WITHDRAW_WINDOW < until) unlockAt = until;
+        emit Frozen(until, reason);
     }
 
     function setCooldown(uint256 _cooldown) external onlyOwner {

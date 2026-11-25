@@ -127,6 +127,34 @@ describe("OperatorStake — bond + slash for revenue under-reporting", () => {
     expect(await stake.staked()).to.equal(0n);
   });
 
+  it("freezes are budgeted per request and never revive a lapsed one", async () => {
+    const { operator, attester, stake } = await fixture();
+    await stake.connect(operator).stake(10_000n * E6);
+    await stake.connect(operator).requestWithdraw(10_000n * E6);
+    await stake.connect(attester).freeze(30 * 86400, "a");
+    await stake.connect(attester).freeze(30 * 86400, "b"); // ~0 added: overlaps the first
+    await bump(29 * 86400);
+    await stake.connect(attester).freeze(30 * 86400, "c");
+    await bump(29 * 86400);
+    await stake.connect(attester).freeze(30 * 86400, "d");
+    await bump(29 * 86400);
+    await expect(stake.connect(attester).freeze(30 * 86400, "e")).to.be.revertedWith("freeze budget");
+    await stake.connect(attester).freeze(0, "lift");
+    await bump(86400);
+    await stake.connect(operator).withdraw();
+    expect(await stake.staked()).to.equal(0n);
+  });
+
+  it("lifting a freeze does not reopen a lapsed request", async () => {
+    const { operator, attester, stake } = await fixture();
+    await stake.connect(operator).stake(10_000n * E6);
+    await stake.connect(operator).requestWithdraw(10_000n * E6);
+    await bump(COOLDOWN + 30 * 86400);
+    await expect(stake.connect(operator).withdraw()).to.be.revertedWith("request lapsed");
+    await stake.connect(attester).freeze(0, "x");
+    await expect(stake.connect(operator).withdraw()).to.be.revertedWith("request lapsed");
+  });
+
   it("a new cooldown applies only after a week of notice", async () => {
     const { owner, stranger, stake } = await fixture();
     await expect(stake.connect(stranger).setCooldown(1)).to.be.reverted;

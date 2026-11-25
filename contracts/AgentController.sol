@@ -102,11 +102,19 @@ contract AgentController is ReentrancyGuard {
     // passing trade could use to pause the crossing. Everyone in a batch gets the same rate.
     uint64 public constant COLLECT_WINDOW = 12 hours;
     uint64 public constant PRICING_WINDOW = 24 hours;
+    // At settlement the window average is checked against the pool's 1-hour average and its spot
+    // composition: the batch uses the lowest A-per-LP of the three (the most A outside, the
+    // smallest payout), and while they disagree by more than DIVERGENCE_BPS it waits, for up to
+    // SETTLE_GRACE. A pool held off its price through the window and released before settlement
+    // therefore only delays the batch; overpaying it means holding the skew through settlement.
     // The capex leg is a proportional LP withdrawal at the moment of settlement, so a same-block
-    // skew of the pool could shrink it. It is floored against the pool's 1-hour average; if that
-    // floor keeps failing for SETTLE_GRACE after the batch is due, liveness wins and it is waived.
+    // skew of the pool could shrink it. It is floored against the pool's 1-hour average, within
+    // CAPEX_TOLERANCE_BPS while the batch is in its grace and within the wider
+    // LATE_CAPEX_TOLERANCE_BPS after it. A batch whose floor cannot be met waits instead of reverting.
     uint64 public constant TWAP_WINDOW = 1 hours;
     uint256 public constant CAPEX_TOLERANCE_BPS = 500;
+    uint256 public constant LATE_CAPEX_TOLERANCE_BPS = 2000;
+    uint256 public constant DIVERGENCE_BPS = 500;
     uint64 public constant SETTLE_GRACE = 1 days;
     uint256 public constant MAX_SETTLE_PER_CALL = 8;
 
@@ -300,37 +308,19 @@ contract AgentController is ReentrancyGuard {
     /// @dev Settle due batches in order, up to `upTo` and MAX_SETTLE_PER_CALL of them.
     function _settleDue(uint256 upTo) internal returns (uint256 n) {
         while (n < MAX_SETTLE_PER_CALL && nextToSettle <= upTo) {
-            if (!_due(nextToSettle)) break;
-            _settle(nextToSettle);
+            if (!_due(nextToSettle) || !_settle(nextToSettle)) break;
             nextToSettle++;
             n++;
         }
     }
 
-    function _settle(uint256 id) internal {
+    /// @dev Returns false (and changes nothing) when the batch must wait: the window average and
+    ///      the 1-hour average disagree during the grace, or the capex floor cannot be met now.
+    function _settle(uint256 id) internal returns (bool) {
         Batch storage b = batches[id];
-        AgentAMM pool = curve.amm();
-        uint256 avg = (pool.aPerLpCumulativeNow() - b.closeCum) / (block.timestamp - b.closedAt);
-        uint256 lp = pool.liquidityBalance(address(curve));
+        (bool ok, uint256 bOut, uint256 lpOut, uint256 minQuote, uint256 avg) = _plan(b);
+        if (!ok) return false;
         uint256 aIn = b.shares * SHARE_UNIT;
-        uint256 outside = _outside(pool, lp, avg);
-        uint256 num = convertibleB - bConverted;
-
-        uint256 bOut;
-        uint256 lpOut;
-        // Terminal sweep: under one whole A would remain outside — this batch takes what is left.
-        if (outside < aIn + SHARE_UNIT) {
-            bOut = num;
-            lpOut = lp;
-        } else {
-            bOut = (aIn * num) / outside;
-            lpOut = (lp * aIn) / outside;
-        }
-
-        uint256 minQuote;
-        if (block.timestamp < b.closedAt + PRICING_WINDOW + SETTLE_GRACE) {
-            minQuote = (_fairQuote(pool, lpOut, avg) * (BPS - CAPEX_TOLERANCE_BPS)) / BPS;
-        }
 
         b.settled = true;
         b.bOut = bOut;
@@ -346,6 +336,42 @@ contract AgentController is ReentrancyGuard {
             quoteToken.safeTransfer(capexSink, released);
         }
         emit BatchSettled(id, b.shares, bOut, released, avg);
+        return true;
+    }
+
+    function _plan(Batch storage b)
+        internal
+        view
+        returns (bool ok, uint256 bOut, uint256 lpOut, uint256 minQuote, uint256 avg)
+    {
+        AgentAMM pool = curve.amm();
+        bool inGrace = block.timestamp < b.closedAt + PRICING_WINDOW + SETTLE_GRACE;
+        uint256 windowAvg = (pool.aPerLpCumulativeNow() - b.closeCum) / (block.timestamp - b.closedAt);
+        uint256 shortAvg = windowAvg;
+        try pool.twapAPerLp(TWAP_WINDOW) returns (uint256 sa) { if (sa > 0) shortAvg = sa; } catch {}
+        {
+            uint256 spot = pool.aPerLpSpot();
+            uint256 hi = Math.max(windowAvg, Math.max(shortAvg, spot));
+            avg = Math.min(windowAvg, Math.min(shortAvg, spot));
+            if (inGrace && (hi - avg) * BPS > hi * DIVERGENCE_BPS) return (false, 0, 0, 0, avg);
+        }
+        uint256 lp = pool.liquidityBalance(address(curve));
+        uint256 aIn = b.shares * SHARE_UNIT;
+        uint256 outside = _outside(pool, lp, avg);
+        uint256 num = convertibleB - bConverted;
+        // Terminal sweep: under one whole A would remain outside — this batch takes what is left.
+        if (outside < aIn + SHARE_UNIT) {
+            bOut = num;
+            lpOut = lp;
+        } else {
+            bOut = (aIn * num) / outside;
+            lpOut = (lp * aIn) / outside;
+        }
+        uint256 tol = inGrace ? CAPEX_TOLERANCE_BPS : LATE_CAPEX_TOLERANCE_BPS;
+        minQuote = (_fairQuote(pool, lpOut, shortAvg) * (BPS - tol)) / BPS;
+        uint256 L = pool.totalLiquidity();
+        if (lpOut > 0 && (L == 0 || (lpOut * pool.quoteReserve()) / L < minQuote)) return (false, 0, 0, 0, avg);
+        ok = true;
     }
 
     /// @dev A that can still claim B: the supply, less the curve's pool position valued at `avg`,
@@ -364,12 +390,9 @@ contract AgentController is ReentrancyGuard {
         return outside > queued ? outside : queued;
     }
 
-    /// @dev Quote that `lpOut` would release at the pool's 1-hour average composition: quote per
-    ///      LP unit is (k / L²) / (A per LP unit), and only swaps move A per LP. Falls back to the
-    ///      batch average if the short average is unavailable.
-    function _fairQuote(AgentAMM pool, uint256 lpOut, uint256 batchAvg) internal view returns (uint256) {
-        uint256 avg = batchAvg;
-        try pool.twapAPerLp(TWAP_WINDOW) returns (uint256 short) { if (short > 0) avg = short; } catch {}
+    /// @dev Quote that `lpOut` would release at A-per-LP `avg` (the 1-hour average): quote per
+    ///      LP unit is (k / L²) / (A per LP unit), and only swaps move A per LP.
+    function _fairQuote(AgentAMM pool, uint256 lpOut, uint256 avg) internal view returns (uint256) {
         uint256 L = pool.totalLiquidity();
         if (avg == 0 || L == 0 || lpOut == 0) return 0;
         uint256 perL = Math.mulDiv(pool.shareReserve(), pool.quoteReserve(), L); // k / L
