@@ -410,6 +410,7 @@ describe("Hardening — activation, launch params and owner bounds", () => {
     await (await f.kyc.setApproved(f.alice.address, true)).wait();
     while (!(await f.curve.graduated())) await buy(f, f.alice, 5_000n);
     await (await f.launchpad.activateController(0, B_TOTAL)).wait();
+    await time.increase(3601n);
     const amm = await f.curve.amm();
     const snap = await ethers.provider.send("evm_snapshot", []);
     await (await convert(f, controller, f.alice, 100n)).wait();
@@ -471,7 +472,8 @@ describe("Hardening — precision, reachability and fixed roles", () => {
     // Cross-block: dump, let a block (and a minute) pass, then quote.
     await (await amm.connect(f.alice).swapShareForQuote(2_000n * WAD, 0n, DL)).wait();
     await time.increase(60n);
-    expect(await controller.quoteConversion(1_000n)).to.be.lte(fair + fair / 1000n);
+    // A minute of the dumped spot is 1/60 of the hour: the rate moves by a sliver, not the dump.
+    expect(await controller.quoteConversion(1_000n)).to.be.lte(fair + fair / 100n);
     // Buying A out of the pool lowers the spot leg, so the rate can only go down.
     const q = await amm.quoteForShare(1_000n * WAD).catch(() => 0n);
     await (await f.dobx.connect(f.alice).approve(await amm.getAddress(), ethers.MaxUint256)).wait();
