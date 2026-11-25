@@ -41,11 +41,12 @@ contract AgentAMM is ReentrancyGuard {
     event LiquidityRemoved(address indexed provider, uint256 shareAmount, uint256 quoteAmount, uint256 liquidity);
     event Swap(address indexed user, address tokenIn, uint256 amountIn, uint256 amountOut);
 
-    // Reserves as they stood when this block began. Read by the A→B crossing, whose rate depends
-    // on how much A sits in the pool: a same-block swap must not be able to move it.
-    uint256 private snapBlock;
-    uint256 private snapShareReserve;
-    uint256 private snapTotalLiquidity;
+    // Time-weighted A per LP unit (1e18-scaled), accumulated with the state BEFORE each change, so
+    // that a swap in this block contributes nothing until time passes. Read by the A→B crossing,
+    // whose rate depends on how much A the curve's position holds. A per LP unit only moves with
+    // swaps: adding or removing liquidity scales both sides.
+    uint256 public aPerLpCumulative;
+    uint64 public lastAccrual;
 
     modifier ensure(uint256 deadline) {
         require(block.timestamp <= deadline, "expired");
@@ -53,10 +54,10 @@ contract AgentAMM is ReentrancyGuard {
     }
 
     modifier snapshot() {
-        if (block.number != snapBlock) {
-            snapBlock = block.number;
-            snapShareReserve = shareReserve;
-            snapTotalLiquidity = totalLiquidity;
+        uint256 dt = block.timestamp - lastAccrual;
+        if (dt > 0) {
+            if (totalLiquidity > 0) aPerLpCumulative += ((shareReserve * 1e18) / totalLiquidity) * dt;
+            lastAccrual = uint64(block.timestamp);
         }
         _;
     }
@@ -184,10 +185,14 @@ contract AgentAMM is ReentrancyGuard {
 
     // ─── Views ────────────────────────────────────────────────────────────────
 
-    /// @notice `shareReserve` and `totalLiquidity` as of the start of the current block.
-    function blockStartState() external view returns (uint256 shareRes, uint256 totalLiq) {
-        if (snapBlock == block.number) return (snapShareReserve, snapTotalLiquidity);
-        return (shareReserve, totalLiquidity);
+    /// @notice A per LP unit right now (1e18-scaled).
+    function aPerLpSpot() public view returns (uint256) {
+        return totalLiquidity == 0 ? 0 : (shareReserve * 1e18) / totalLiquidity;
+    }
+
+    /// @notice The time-weighted accumulator brought up to this second.
+    function aPerLpCumulativeNow() external view returns (uint256) {
+        return aPerLpCumulative + aPerLpSpot() * (block.timestamp - lastAccrual);
     }
 
     function getAmountOut(uint256 amountIn, uint256 reserveIn, uint256 reserveOut) external pure returns (uint256) {

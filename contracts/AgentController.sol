@@ -87,13 +87,18 @@ contract AgentController is ReentrancyGuard {
     uint256 public aBurned;        // whole A shares retired through this controller
     uint256 public capexFunded;    // quote forwarded to capexSink
 
-    // The rate is set once per block: B still unconverted over A still outside the curve's pool
-    // position, both read as they stood when the block began. A fixed denominator counted the A
-    // the curve seeded into the AMM — burned on conversion without ever claiming B — and left
-    // that share of B unreachable.
-    uint256 private rateBlock;
-    uint256 private rateNum;
-    uint256 private rateDen;
+    // The rate is B still unconverted over A still outside the curve's pool position, recomputed
+    // on every conversion. A fixed denominator counted the A the curve seeded into the AMM — burned
+    // on conversion without ever claiming B — and left that share of B unreachable. The curve's
+    // position is valued at the LOWER of the AMM's spot and its time-weighted A per LP unit over at
+    // least TWAP_WINDOW: dumping A into the pool cannot raise the rate (the average barely moves),
+    // and buying A out of it right before converting only lowers it.
+    uint64 public constant TWAP_WINDOW = 1 hours;
+    uint256 public aPerLpAtActivation;
+    uint256 private ckptCum;
+    uint64 private ckptTime;
+    uint256 private pendCum;
+    uint64 private pendTime;
 
     event Activated(uint256 totalB, uint256 convertibleB, uint256 retainedB, uint256 aSupply, uint64 graceEnd);
     event Converted(address indexed account, uint256 wholeSharesA, uint256 bOut, uint256 quoteToCapex);
@@ -161,6 +166,10 @@ contract AgentController is ReentrancyGuard {
         // Precision floor: one whole A must be worth ≥1e6 wei of B, so per-conversion rounding is negligible.
         require(convertibleB * 1e12 >= aSupply, "B too coarse");
         aSupplyAtActivation = aSupply;
+        AgentAMM pool = curve.amm();
+        aPerLpAtActivation = pool.aPerLpSpot();
+        ckptCum = pendCum = pool.aPerLpCumulativeNow();
+        ckptTime = pendTime = uint64(block.timestamp);
         graceEnd = uint64(block.timestamp) + graceSeconds;
         cliffEnd = uint64(block.timestamp) + cliffSeconds;
         vestEnd = cliffEnd + vestSeconds;
@@ -182,20 +191,33 @@ contract AgentController is ReentrancyGuard {
         nonReentrant
         returns (uint256 bOut)
     {
+        return _convert(wholeShares, minQuoteToCapex, 1);
+    }
+
+    /// @notice {convert} with a floor on the B received and a deadline.
+    function convertWithLimits(uint256 wholeShares, uint256 minQuoteToCapex, uint256 minBOut, uint256 deadline)
+        external
+        nonReentrant
+        returns (uint256 bOut)
+    {
+        require(block.timestamp <= deadline, "expired");
+        return _convert(wholeShares, minQuoteToCapex, minBOut);
+    }
+
+    function _convert(uint256 wholeShares, uint256 minQuoteToCapex, uint256 minBOut) internal returns (uint256 bOut) {
         require(activated, "not activated");
         require(block.timestamp >= graceEnd, "grace period");
         require(wholeShares > 0, "zero");
         require(address(kyc) == address(0) || kyc.isApproved(msg.sender), "kyc required");
 
         uint256 aIn = wholeShares * SHARE_UNIT;
-        if (rateBlock != block.number) {
-            (rateNum, rateDen) = conversionRate();
-            rateBlock = block.number;
-        }
-        require(rateDen > 0, "no outstanding A");
-        bOut = (aIn * rateNum) / rateDen;
-        if (bOut > convertibleB - bConverted) bOut = convertibleB - bConverted;
+        _rotateCheckpoint();
+        (uint256 num, uint256 den) = conversionRate();
+        require(den > 0, "no outstanding A");
+        bOut = (aIn * num) / den;
+        if (bOut > num) bOut = num;
         require(bOut > 0, "dust");
+        require(bOut >= minBOut, "slippage");
         require(bConverted + bOut <= convertibleB, "convertible exhausted");
 
         bConverted += bOut;
@@ -216,15 +238,34 @@ contract AgentController is ReentrancyGuard {
         emit Converted(msg.sender, wholeShares, bOut, released);
     }
 
-    /// @notice The current B-per-A rate as (unconverted B, A outside the curve's pool position),
-    ///         from block-start pool state. Within a block that already converted, the rate fixed
-    ///         by its first conversion applies.
+    /// @dev Keeps a checkpoint of the AMM accumulator at least TWAP_WINDOW old.
+    function _rotateCheckpoint() internal {
+        if (block.timestamp - pendTime >= TWAP_WINDOW) {
+            (ckptCum, ckptTime) = (pendCum, pendTime);
+            pendCum = curve.amm().aPerLpCumulativeNow();
+            pendTime = uint64(block.timestamp);
+        }
+    }
+
+    /// @notice A per LP unit the curve's position is valued at: min(spot, average since a
+    ///         checkpoint at least TWAP_WINDOW old — or the activation value until one exists).
+    function effectiveAPerLp() public view returns (uint256) {
+        AgentAMM pool = curve.amm();
+        uint256 spot = pool.aPerLpSpot();
+        uint256 avg = aPerLpAtActivation;
+        (uint256 cCum, uint64 cTime) = (ckptCum, ckptTime);
+        if (block.timestamp - pendTime >= TWAP_WINDOW) (cCum, cTime) = (pendCum, pendTime);
+        if (block.timestamp - cTime >= TWAP_WINDOW) {
+            avg = (pool.aPerLpCumulativeNow() - cCum) / (block.timestamp - cTime);
+        }
+        return spot < avg ? spot : avg;
+    }
+
+    /// @notice The current B-per-A rate as (unconverted B, A outside the curve's pool position).
     function conversionRate() public view returns (uint256 num, uint256 den) {
         if (!activated) return (0, 0);
-        if (rateBlock == block.number) return (rateNum, rateDen);
         AgentAMM pool = curve.amm();
-        (uint256 shareRes, uint256 totalLiq) = pool.blockStartState();
-        uint256 curveShares = totalLiq == 0 ? 0 : (shareRes * pool.liquidityBalance(address(curve))) / totalLiq;
+        uint256 curveShares = (pool.liquidityBalance(address(curve)) * effectiveAPerLp()) / 1e18;
         uint256 supply = agentToken.totalSupply();
         den = supply > curveShares ? supply - curveShares : 0;
         num = convertibleB - bConverted;

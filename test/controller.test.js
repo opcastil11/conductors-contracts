@@ -429,24 +429,38 @@ describe("Hardening — precision, reachability and fixed roles", () => {
     expect(cb - (await controller.bConverted())).to.be.lt(cb / 10n ** 6n);
   });
 
-  it("a swap in the same block cannot move the conversion rate", async () => {
+  it("dumping A into the pool does not raise the rate; buying it out right before converting only lowers it", async () => {
     const f = await deploy();
     const controller = await attachController(f);
     await (await f.kyc.setApproved(f.alice.address, true)).wait();
-    await (await convert(f, controller, f.alice, 10n)).wait(); // mines a block; rate reads current state
+    await time.increase(7200n);
+    await (await convert(f, controller, f.alice, 10n)).wait();
+    await time.increase(7200n);
     const amm = await ethers.getContractAt("AgentAMM", await f.curve.amm());
     const fair = await controller.quoteConversion(1_000n);
     await (await f.share.connect(f.alice).approve(await amm.getAddress(), ethers.MaxUint256)).wait();
-    await (await f.share.connect(f.alice).approve(await controller.getAddress(), ethers.MaxUint256)).wait();
-    const before = await f.bToken.balanceOf(f.alice.address);
-    await ethers.provider.send("evm_setAutomine", [false]);
-    // Dump A into the pool to shrink "outside" A, then convert in the same block.
-    await amm.connect(f.alice).swapShareForQuote(2_000n * WAD, 0n, DL);
-    await controller.connect(f.alice).convert(1_000n, 0n);
-    await ethers.provider.send("evm_mine", []);
-    await ethers.provider.send("evm_setAutomine", [true]);
-    expect((await f.bToken.balanceOf(f.alice.address)) - before).to.equal(fair);
+    // Cross-block: dump, let a block (and a minute) pass, then quote.
+    await (await amm.connect(f.alice).swapShareForQuote(2_000n * WAD, 0n, DL)).wait();
+    await time.increase(60n);
+    expect(await controller.quoteConversion(1_000n)).to.be.lte(fair + fair / 1000n);
+    // Buying A out of the pool lowers the spot leg, so the rate can only go down.
+    const q = await amm.quoteForShare(1_000n * WAD).catch(() => 0n);
+    await (await f.dobx.connect(f.alice).approve(await amm.getAddress(), ethers.MaxUint256)).wait();
+    await (await amm.connect(f.alice).swapQuoteForShare(10n ** 21n, 0n, DL)).wait();
+    expect(await controller.quoteConversion(1_000n)).to.be.lt(fair);
   });
+
+  it("convertWithLimits enforces the B floor and the deadline", async () => {
+    const f = await deploy();
+    const controller = await attachController(f);
+    await (await f.kyc.setApproved(f.alice.address, true)).wait();
+    await (await f.share.connect(f.alice).approve(await controller.getAddress(), ethers.MaxUint256)).wait();
+    const q = await controller.quoteConversion(100n);
+    await expect(controller.connect(f.alice).convertWithLimits(100n, 0n, q + 1n, DL)).to.be.revertedWith("slippage");
+    await expect(controller.connect(f.alice).convertWithLimits(100n, 0n, q, 1n)).to.be.revertedWith("expired");
+    await expect(controller.connect(f.alice).convertWithLimits(100n, 0n, q, DL)).to.not.be.reverted;
+  });
+
 
   it("refuses to activate on B too coarse to split per whole A", async () => {
     const f = await deploy();
