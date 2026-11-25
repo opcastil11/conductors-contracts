@@ -68,12 +68,13 @@ describe("OperatorStake — bond + slash for revenue under-reporting", () => {
     await expect(stake.connect(operator).withdraw()).to.be.reverted;
   });
 
-  it("gates slash to attester/owner and bounds the amount", async () => {
-    const { owner, operator, stranger, stake } = await fixture();
+  it("gates slash to the attester only (not the owner) and bounds the amount", async () => {
+    const { owner, operator, attester, stranger, stake } = await fixture();
     await stake.connect(operator).stake(1_000n * E6);
     await expect(stake.connect(stranger).slash(1n, "x")).to.be.revertedWith("not attester");
-    await expect(stake.connect(owner).slash(2_000n * E6, "too much")).to.be.revertedWith("bad amount");
-    await stake.connect(owner).slash(1_000n * E6, "owner can slash");
+    await expect(stake.connect(owner).slash(1n, "x")).to.be.revertedWith("not attester");
+    await expect(stake.connect(attester).slash(2_000n * E6, "too much")).to.be.revertedWith("bad amount");
+    await stake.connect(attester).slash(1_000n * E6, "attester slashes");
     expect(await stake.staked()).to.equal(0n);
   });
 
@@ -98,10 +99,15 @@ describe("OperatorStake — bond + slash for revenue under-reporting", () => {
     expect(await stake.staked()).to.equal(600n * E6); // only the amount fixed at request time
   });
 
-  it("only owner manages attester/beneficiary/cooldown", async () => {
+  it("only the owner rotates the attester, and only after the timelock", async () => {
     const { owner, stranger, attester, stake } = await fixture();
     await expect(stake.connect(stranger).setAttester(stranger.address)).to.be.reverted;
     await stake.connect(owner).setAttester(stranger.address);
+    expect(await stake.attester()).to.equal(attester.address);
+    await expect(stake.connect(owner).acceptAttester()).to.be.revertedWith("timelocked");
+    await ethers.provider.send("evm_increaseTime", [2 * 24 * 3600]);
+    await ethers.provider.send("evm_mine", []);
+    await stake.connect(owner).acceptAttester();
     expect(await stake.attester()).to.equal(stranger.address);
   });
 });

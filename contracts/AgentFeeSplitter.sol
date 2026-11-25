@@ -62,7 +62,7 @@ contract AgentFeeSplitter is Ownable, ReentrancyGuard {
     }
 
     function setAgent(address _agent) external {
-        require(msg.sender == agent || msg.sender == owner(), "not agent/owner");
+        require(msg.sender == agent, "not agent"); // the owner can't redirect the agent's share
         require(_agent != address(0), "zero addr");
         agent = _agent;
         emit AgentUpdated(_agent);

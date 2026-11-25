@@ -109,7 +109,8 @@ contract AgentController is ReentrancyGuard {
         require(_quoteToken != address(0) && _curve != address(0), "zero addr");
         require(_creator != address(0) && _capexSink != address(0), "zero recipient");
         require(_activator != address(0), "zero activator");
-        require(_retainedBps < BPS, "retain all"); // some B must remain convertible or A has no floor
+        require(_retainedBps <= BPS / 2, "retain too much"); // most B must stay convertible or A has no floor
+        require(_graceSeconds <= 365 days && _cliffSeconds <= 4 * 365 days && _vestSeconds <= 4 * 365 days, "schedule too long");
         agentToken = IERC20(_agentToken);
         participationToken = IERC20(_participationToken);
         quoteToken = IERC20(_quoteToken);
@@ -147,6 +148,8 @@ contract AgentController is ReentrancyGuard {
         activated = true;
         retainedB = (totalB * retainedBps) / BPS;
         convertibleB = totalB - retainedB;
+        // Precision floor: one whole A must be worth ≥1e6 wei of B, so per-conversion rounding is negligible.
+        require(convertibleB * 1e12 >= aSupply, "B too coarse");
         aSupplyAtActivation = aSupply;
         graceEnd = uint64(block.timestamp) + graceSeconds;
         cliffEnd = uint64(block.timestamp) + cliffSeconds;

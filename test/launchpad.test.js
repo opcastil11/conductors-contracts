@@ -106,9 +106,15 @@ describe("AgentBondingCurve", () => {
     const proceeds = await curve.getSellProceeds(50n);
     await share.connect(alice).approve(await curve.getAddress(), 50n * WAD);
     const before = await usdc.balanceOf(alice.address);
+    const raisedBefore = await curve.raised();
+    const feeTo = await curve.feeRecipient();
+    const feeBefore = await usdc.balanceOf(feeTo);
     await curve.connect(alice).sell(50n, proceeds, DL);
     expect((await usdc.balanceOf(alice.address)) - before).to.equal(proceeds);
     expect(await curve.sold()).to.equal(150n);
+    // the sell fee goes to the fee recipient and leaves the reserve with the gross
+    const gross = raisedBefore - (await curve.raised());
+    expect((await usdc.balanceOf(feeTo)) - feeBefore).to.equal(gross - proceeds);
   });
 });
 

@@ -42,13 +42,12 @@ describe("AgentFeeSplitter — A's trading fees, agent 65 / platform 35", () => 
     expect(await splitter.agentBps()).to.equal(8000);
   });
 
-  it("the agent or the owner rotates the agent payee; nobody else", async () => {
+  it("only the agent rotates its own payee — not the owner, not a stranger", async () => {
     const { owner, agent, alice, stranger, splitter } = await fixture();
-    await expect(splitter.connect(stranger).setAgent(stranger.address)).to.be.revertedWith("not agent/owner");
+    await expect(splitter.connect(stranger).setAgent(stranger.address)).to.be.revertedWith("not agent");
+    await expect(splitter.connect(owner).setAgent(owner.address)).to.be.revertedWith("not agent");
     await splitter.connect(agent).setAgent(alice.address);
     expect(await splitter.agent()).to.equal(alice.address);
-    await splitter.connect(owner).setAgent(agent.address);
-    expect(await splitter.agent()).to.equal(agent.address);
   });
 
   it("works as a curve's explicit feeRecipient", async () => {

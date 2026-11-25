@@ -26,8 +26,11 @@ contract OperatorStake is Ownable, ReentrancyGuard {
     IERC20 public immutable bondToken;  // USDC
     address public immutable operator;  // the bonded operator
 
-    address public attester;            // may slash (attestation oracle / owner)
-    address public beneficiary;         // receives slashed funds (insurance / treasury)
+    address public attester;            // the only address that may slash
+    address public immutable beneficiary; // receives slashed funds (insurance / treasury); fixed
+    address public pendingAttester;
+    uint256 public pendingAttesterAt;
+    uint256 public constant ATTESTER_DELAY = 2 days;
     uint256 public cooldown;            // seconds a withdrawal must wait
 
     uint256 public staked;              // bonded amount currently held
@@ -45,7 +48,7 @@ contract OperatorStake is Ownable, ReentrancyGuard {
     event Withdrawn(uint256 amount, uint256 remaining);
     event Slashed(uint256 amount, address indexed to, string reason, uint256 remaining);
     event AttesterUpdated(address indexed attester);
-    event BeneficiaryUpdated(address indexed beneficiary);
+    event AttesterProposed(address indexed attester, uint256 effectiveAt);
     event CooldownUpdated(uint256 cooldown);
 
     modifier onlyOperator() {
@@ -114,7 +117,7 @@ contract OperatorStake is Ownable, ReentrancyGuard {
     /// @notice Slash part (or all) of the bond to the beneficiary. Works during the cooldown, and
     ///         cancels any pending withdrawal: the operator must re-request (and re-wait) after it.
     function slash(uint256 amount, string calldata reason) external nonReentrant {
-        require(msg.sender == attester || msg.sender == owner(), "not attester");
+        require(msg.sender == attester, "not attester");
         require(amount > 0 && amount <= staked, "bad amount");
         staked -= amount;
         _cancelPending();
@@ -122,16 +125,21 @@ contract OperatorStake is Ownable, ReentrancyGuard {
         emit Slashed(amount, beneficiary, reason, staked);
     }
 
+    /// @notice Propose a new attester; it takes effect after ATTESTER_DELAY via {acceptAttester},
+    ///         so a leaked owner key can't install itself and slash the bond in one go.
     function setAttester(address _attester) external onlyOwner {
         require(_attester != address(0), "zero addr");
-        attester = _attester;
-        emit AttesterUpdated(_attester);
+        pendingAttester = _attester;
+        pendingAttesterAt = block.timestamp + ATTESTER_DELAY;
+        emit AttesterProposed(_attester, pendingAttesterAt);
     }
 
-    function setBeneficiary(address _beneficiary) external onlyOwner {
-        require(_beneficiary != address(0), "zero addr");
-        beneficiary = _beneficiary;
-        emit BeneficiaryUpdated(_beneficiary);
+    function acceptAttester() external onlyOwner {
+        require(pendingAttester != address(0), "none pending");
+        require(block.timestamp >= pendingAttesterAt, "timelocked");
+        attester = pendingAttester;
+        pendingAttester = address(0);
+        emit AttesterUpdated(attester);
     }
 
     function setCooldown(uint256 _cooldown) external onlyOwner {

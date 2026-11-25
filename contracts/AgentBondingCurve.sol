@@ -156,15 +156,18 @@ contract AgentBondingCurve is ReentrancyGuard {
         require(!graduated, "graduated");
         require(wholeShares > 0 && wholeShares <= sold, "bad amount");
 
-        uint256 proceeds = getSellProceeds(wholeShares);
+        uint256 gross = _integralFrom(sold - wholeShares, wholeShares);
+        uint256 fee = (gross * sellFeeBps) / 10000;
+        uint256 proceeds = gross - fee;
         require(proceeds >= minQuoteOut, "slippage");
-        require(proceeds <= raised, "insufficient reserve");
+        require(gross <= raised, "insufficient reserve");
 
         sold -= wholeShares;
-        raised -= proceeds;
+        raised -= gross;   // the sell fee leaves the reserve too, to the same recipient as the buy fee
 
         shareToken.safeTransferFrom(msg.sender, address(this), wholeShares * SHARE_UNIT);
         quoteToken.safeTransfer(msg.sender, proceeds);
+        if (fee > 0) quoteToken.safeTransfer(feeRecipient, fee);
 
         emit Sold(msg.sender, wholeShares, proceeds, getCurrentPrice());
     }
@@ -202,6 +205,8 @@ contract AgentBondingCurve is ReentrancyGuard {
             require(releasedQuote <= raised, "insufficient reserve");
             sold -= wholeShares;
             raised -= releasedQuote;
+            // Burning shrinks the buyable inventory; a conversion may not leave the goal out of reach.
+            require(raised + _integralFrom(sold, curveSupply - 1 - sold - (burned + wholeShares)) >= graduationRaise, "grad unreachable");
         } else {
             // Post-graduation: the reserve is the AMM's quote leg. Withdraw the same share of
             // this curve's LP as the A being retired is of circulating A, and burn the share leg

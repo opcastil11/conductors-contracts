@@ -41,7 +41,7 @@ contract AgentLaunchpad is Ownable, Pausable {
      *      RELAUNCHING them. That is a known, accepted cost of the switch, not a bug to route
      *      around.
      */
-    IERC20 public quoteToken;
+    IERC20 public immutable quoteToken; // fixed: a new quote token is a new launchpad
     address public platformTreasury;  // fee recipient + leftover-A treasury
     IKycRegistry public kycRegistry;  // gate applied at the A→B crossing; 0 ⇒ ungated (testnet)
     AgentCurveFactory public immutable curveFactory; // created here; holds the curve's creation code (size split)
@@ -72,7 +72,6 @@ contract AgentLaunchpad is Ownable, Pausable {
 
     Launch[] public launches;
 
-    event QuoteTokenUpdated(address indexed quoteToken);
     event TreasuryUpdated(address indexed treasury);
     event KycRegistryUpdated(address indexed registry);
     event ControllerFactoryUpdated(address indexed factory);
@@ -118,11 +117,6 @@ contract AgentLaunchpad is Ownable, Pausable {
 
     // ─── Admin ────────────────────────────────────────────────────────────────
 
-    function setQuoteToken(address _quoteToken) external onlyOwner {
-        require(_quoteToken != address(0), "zero addr");
-        quoteToken = IERC20(_quoteToken);
-        emit QuoteTokenUpdated(_quoteToken);
-    }
 
     function setPlatformTreasury(address _treasury) external onlyOwner {
         require(_treasury != address(0), "zero addr");
@@ -299,8 +293,11 @@ contract AgentLaunchpad is Ownable, Pausable {
     ///      the AMM). The curve itself clamps the seed to a valid range, so no tight lower bound
     ///      is needed here — only that graduation triggers before the full integral is raised.
     function _validateGraduation(LaunchParams calldata p) internal pure {
-        uint256 fullIntegral = p.supply * p.basePrice + (p.slope * (p.supply - 1) * p.supply) / 2;
-        require(p.graduationRaise < fullIntegral, "grad unreachable");
+        // `buy` keeps ≥1 share back to seed the AMM, so at most supply−1 shares are ever sold.
+        require(p.supply > 1, "grad unreachable");
+        uint256 k = p.supply - 1;
+        uint256 sellable = k * p.basePrice + (p.slope * (k - 1) * k) / 2;
+        require(p.graduationRaise <= sellable, "grad unreachable");
     }
 
     // ─── Views ────────────────────────────────────────────────────────────────
