@@ -29,6 +29,7 @@ contract AgentControllerFactory {
         address creator;
         address capexSink;
         address kyc;
+        address activator;
         uint16 retainedBps;
         uint64 graceSeconds;
         uint64 cliffSeconds;
@@ -44,6 +45,7 @@ contract AgentControllerFactory {
             a.creator,
             a.capexSink,
             a.kyc,
+            a.activator,
             a.retainedBps,
             a.graceSeconds,
             a.cliffSeconds,

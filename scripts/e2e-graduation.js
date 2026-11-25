@@ -37,6 +37,7 @@ const AMM = [
 const ERC20 = [
   "function approve(address,uint256) returns (bool)",
   "function balanceOf(address) view returns (uint256)",
+  "function totalSupply() view returns (uint256)",
 ];
 
 const f = (v) => ethers.formatUnits(v, 18);
@@ -74,6 +75,8 @@ async function main() {
     buyFeeBps: 100,
     sellFeeBps: 100,
     graduationRaise: gradRaise,
+    creator: me.address,
+    feeRecipient: ethers.ZeroAddress,
   });
   const rc = await tx.wait();
   const ev = rc.logs
@@ -116,11 +119,10 @@ async function main() {
   console.log(`1 A now sells into the AMM for ${f(await amm.quoteForShare(10n ** 18n))} DOBX`);
   if (Math.abs(drift) > 1) throw new Error(`price cliff at graduation: ${drift.toFixed(3)}%`);
 
-  // Unsold inventory goes to the platform treasury. On this deployment the treasury IS the
-  // deployer, so its balance also contains the A just bought — report the two apart.
-  const treasuryA = await new ethers.Contract(await curve.shareToken(), ERC20, me).balanceOf(deployment.platformTreasury);
-  const leftover = treasuryA - (deployment.platformTreasury === me.address ? shares * 10n ** 18n : 0n);
-  console.log(`leftover A to treasury: ${f(leftover)} (of ${supply} minted: ${shares} sold, ${f(shareReserve)} seeded)`);
+  // Unsold inventory is burned: what remains is exactly the A sold plus the AMM's seed.
+  const totalA = await new ethers.Contract(await curve.shareToken(), ERC20, me).totalSupply();
+  console.log(`A supply after graduation: ${f(totalA)} (of ${supply} minted: ${shares} sold, ${f(shareReserve)} seeded, rest burned)`);
+  if (totalA !== shares * 10n ** 18n + shareReserve) throw new Error("unsold A was not burned");
   console.log("OK — graduated with no price cliff");
 }
 

@@ -51,16 +51,15 @@ describe("AgentFeeSplitter — A's trading fees, agent 65 / platform 35", () => 
     expect(await splitter.agent()).to.equal(agent.address);
   });
 
-  it("works as a curve's feeRecipient via the launchpad's treasury slot", async () => {
+  it("works as a curve's explicit feeRecipient", async () => {
     const { owner, platform, agent, alice, usdc, splitter } = await fixture();
     const launchpad = await (await ethers.getContractFactory("AgentLaunchpad"))
       .deploy(owner.address, await usdc.getAddress(), platform.address);
-    await launchpad.setPlatformTreasury(await splitter.getAddress());
     await (await launchpad.launch({
       name: "Apumail", symbol: "APU", supply: 1_000_000n, basePrice: 50_000n,
       slope: 100n, buyFeeBps: 100n, sellFeeBps: 100n, graduationRaise: 50_000_000n,
+      creator: agent.address, feeRecipient: await splitter.getAddress(),
     })).wait();
-    await launchpad.setPlatformTreasury(platform.address);
     const curve = await ethers.getContractAt("AgentBondingCurve", (await launchpad.getLaunch(0)).curve);
     expect(await curve.feeRecipient()).to.equal(await splitter.getAddress());
 

@@ -41,6 +41,8 @@ async function main() {
     buyFeeBps,
     sellFeeBps,
     graduationRaise,
+    creator: process.env.CREATOR || deployer.address,
+    feeRecipient: process.env.FEE_RECIPIENT || ethers.ZeroAddress,
   };
 
   console.log(`\nLaunching "${name}" (${symbol}), supply ${supply} shares…`);

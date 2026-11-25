@@ -32,9 +32,16 @@ contract OperatorStake is Ownable, ReentrancyGuard {
 
     uint256 public staked;              // bonded amount currently held
     uint256 public unlockAt;            // maturity of a pending withdrawal (0 = none pending)
+    uint256 public pendingAmount;       // amount fixed at request time
+
+    /// @notice A matured request must be used within this window or it lapses — otherwise one old
+    ///         request would be a standing permission to exit instantly whenever a slash loomed.
+    uint256 public constant WITHDRAW_WINDOW = 7 days;
+    uint256 public constant MAX_COOLDOWN = 90 days;
 
     event Staked(address indexed operator, uint256 amount, uint256 total);
-    event WithdrawRequested(uint256 unlockAt);
+    event WithdrawRequested(uint256 amount, uint256 unlockAt);
+    event WithdrawCancelled();
     event Withdrawn(uint256 amount, uint256 remaining);
     event Slashed(uint256 amount, address indexed to, string reason, uint256 remaining);
     event AttesterUpdated(address indexed attester);
@@ -56,6 +63,7 @@ contract OperatorStake is Ownable, ReentrancyGuard {
     ) Ownable(_owner) {
         require(_bondToken != address(0) && _operator != address(0), "zero addr");
         require(_attester != address(0) && _beneficiary != address(0), "zero addr");
+        require(_cooldown <= MAX_COOLDOWN, "cooldown too long");
         bondToken = IERC20(_bondToken);
         operator = _operator;
         attester = _attester;
@@ -70,34 +78,46 @@ contract OperatorStake is Ownable, ReentrancyGuard {
         require(amount > 0, "amount>0");
         bondToken.safeTransferFrom(msg.sender, address(this), amount);
         staked += amount;
-        unlockAt = 0; // topping up recommits the bond
+        _cancelPending(); // topping up recommits the bond
         emit Staked(operator, amount, staked);
     }
 
-    /// @notice Begin the withdrawal cooldown. Slashing still applies until funds actually leave.
-    function requestWithdraw() external onlyOperator {
-        require(staked > 0, "nothing staked");
+    /// @notice Begin the cooldown for withdrawing `amount`. Slashing still applies until funds leave.
+    function requestWithdraw(uint256 amount) external onlyOperator {
+        require(amount > 0 && amount <= staked, "bad amount");
+        pendingAmount = amount;
         unlockAt = block.timestamp + cooldown;
-        emit WithdrawRequested(unlockAt);
+        emit WithdrawRequested(amount, unlockAt);
     }
 
-    /// @notice Withdraw up to the bonded amount once the cooldown has matured.
-    function withdraw(uint256 amount) external onlyOperator nonReentrant {
+    /// @notice Withdraw the requested amount, once matured and before the window lapses. One shot.
+    function withdraw() external onlyOperator nonReentrant {
         require(unlockAt != 0 && block.timestamp >= unlockAt, "cooldown");
-        require(amount > 0 && amount <= staked, "bad amount");
+        require(block.timestamp <= unlockAt + WITHDRAW_WINDOW, "request lapsed");
+        uint256 amount = pendingAmount <= staked ? pendingAmount : staked;
+        require(amount > 0, "nothing to withdraw");
+        _cancelPending();
         staked -= amount;
-        if (staked == 0) unlockAt = 0;
         bondToken.safeTransfer(operator, amount);
         emit Withdrawn(amount, staked);
     }
 
+    function _cancelPending() internal {
+        if (unlockAt == 0 && pendingAmount == 0) return;
+        unlockAt = 0;
+        pendingAmount = 0;
+        emit WithdrawCancelled();
+    }
+
     // ─── Attester / owner ─────────────────────────────────────────────────────────
 
-    /// @notice Slash part (or all) of the bond to the beneficiary. Works during the cooldown.
+    /// @notice Slash part (or all) of the bond to the beneficiary. Works during the cooldown, and
+    ///         cancels any pending withdrawal: the operator must re-request (and re-wait) after it.
     function slash(uint256 amount, string calldata reason) external nonReentrant {
         require(msg.sender == attester || msg.sender == owner(), "not attester");
         require(amount > 0 && amount <= staked, "bad amount");
         staked -= amount;
+        _cancelPending();
         bondToken.safeTransfer(beneficiary, amount);
         emit Slashed(amount, beneficiary, reason, staked);
     }
@@ -115,6 +135,7 @@ contract OperatorStake is Ownable, ReentrancyGuard {
     }
 
     function setCooldown(uint256 _cooldown) external onlyOwner {
+        require(_cooldown <= MAX_COOLDOWN, "cooldown too long");
         cooldown = _cooldown;
         emit CooldownUpdated(_cooldown);
     }

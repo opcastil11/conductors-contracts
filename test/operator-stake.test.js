@@ -32,25 +32,25 @@ describe("OperatorStake — bond + slash for revenue under-reporting", () => {
   it("only the operator can stake / request / withdraw", async () => {
     const { stranger, stake } = await fixture();
     await expect(stake.connect(stranger).stake(1n)).to.be.revertedWith("not operator");
-    await expect(stake.connect(stranger).requestWithdraw()).to.be.revertedWith("not operator");
-    await expect(stake.connect(stranger).withdraw(1n)).to.be.revertedWith("not operator");
+    await expect(stake.connect(stranger).requestWithdraw(1n)).to.be.revertedWith("not operator");
+    await expect(stake.connect(stranger).withdraw()).to.be.revertedWith("not operator");
   });
 
   it("enforces the withdrawal cooldown", async () => {
     const { operator, stake } = await fixture();
     await stake.connect(operator).stake(10_000n * E6);
-    await expect(stake.connect(operator).withdraw(1n)).to.be.revertedWith("cooldown"); // no request yet
-    await stake.connect(operator).requestWithdraw();
-    await expect(stake.connect(operator).withdraw(1n)).to.be.revertedWith("cooldown"); // too early
+    await expect(stake.connect(operator).withdraw()).to.be.revertedWith("cooldown"); // no request yet
+    await stake.connect(operator).requestWithdraw(10_000n * E6);
+    await expect(stake.connect(operator).withdraw()).to.be.revertedWith("cooldown"); // too early
     await bump(COOLDOWN);
-    await stake.connect(operator).withdraw(10_000n * E6);
+    await stake.connect(operator).withdraw();
     expect(await stake.staked()).to.equal(0n);
   });
 
   it("attester can slash to the beneficiary — even during the cooldown", async () => {
     const { operator, attester, insurance, stake, usdc } = await fixture();
     await stake.connect(operator).stake(10_000n * E6);
-    await stake.connect(operator).requestWithdraw(); // operator tries to exit
+    await stake.connect(operator).requestWithdraw(10_000n * E6); // operator tries to exit
     expect(await stake.withdrawalPending()).to.equal(true);
 
     // caught under-reporting before the cooldown matures → slashed
@@ -58,10 +58,14 @@ describe("OperatorStake — bond + slash for revenue under-reporting", () => {
     expect(await stake.staked()).to.equal(4_000n * E6);
     expect(await usdc.balanceOf(insurance.address)).to.equal(6_000n * E6);
 
-    // operator can only ever withdraw what's left after slashing
+    // the slash cancelled the request: the operator must ask again and wait a full cooldown
+    expect(await stake.unlockAt()).to.equal(0n);
     await bump(COOLDOWN);
-    await stake.connect(operator).withdraw(4_000n * E6);
-    await expect(stake.connect(operator).withdraw(1n)).to.be.reverted;
+    await expect(stake.connect(operator).withdraw()).to.be.revertedWith("cooldown");
+    await stake.connect(operator).requestWithdraw(4_000n * E6);
+    await bump(COOLDOWN);
+    await stake.connect(operator).withdraw();
+    await expect(stake.connect(operator).withdraw()).to.be.reverted;
   });
 
   it("gates slash to attester/owner and bounds the amount", async () => {
@@ -76,10 +80,22 @@ describe("OperatorStake — bond + slash for revenue under-reporting", () => {
   it("topping up recommits (cancels a pending withdrawal)", async () => {
     const { operator, stake } = await fixture();
     await stake.connect(operator).stake(1_000n * E6);
-    await stake.connect(operator).requestWithdraw();
+    await stake.connect(operator).requestWithdraw(1_000n * E6);
     expect(await stake.unlockAt()).to.be.gt(0n);
     await stake.connect(operator).stake(500n * E6);
     expect(await stake.unlockAt()).to.equal(0n); // recommitted
+  });
+
+  it("a matured request lapses after the window — no standing exit permission", async () => {
+    const { operator, stake } = await fixture();
+    await stake.connect(operator).stake(1_000n * E6);
+    await stake.connect(operator).requestWithdraw(400n * E6);
+    await bump(COOLDOWN + 7 * 86400 + 1);
+    await expect(stake.connect(operator).withdraw()).to.be.revertedWith("request lapsed");
+    await stake.connect(operator).requestWithdraw(400n * E6);
+    await bump(COOLDOWN);
+    await stake.connect(operator).withdraw();
+    expect(await stake.staked()).to.equal(600n * E6); // only the amount fixed at request time
   });
 
   it("only owner manages attester/beneficiary/cooldown", async () => {

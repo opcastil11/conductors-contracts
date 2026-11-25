@@ -16,8 +16,8 @@ import "./AgentShareToken.sol";
  * Security-hardened vs the initial draft (audit fixes):
  *  - **No graduation price cliff**: the AMM is seeded at ~the curve's terminal price
  *    (`seedShares = raised / terminalPrice`), not by dumping the whole inventory. Leftover
- *    inventory goes to the treasury, so a back-runner can't buy the float far below what curve
- *    buyers paid.
+ *    inventory is BURNED, so a back-runner can't buy the float far below what curve buyers paid
+ *    and no unsold A — which no reserve backs — can reach anyone, let alone cross to B.
  *  - **Donation-proof inventory**: remaining shares are computed from an immutable `curveSupply`
  *    minus `sold`/`burned`, never `balanceOf`, so donating shares can't skew the seed.
  *  - **Deadlines** on buy/sell to bound MEV/held-tx execution.
@@ -59,7 +59,6 @@ contract AgentBondingCurve is ReentrancyGuard {
     uint256 public immutable graduationRaise;
     uint256 public immutable curveSupply;     // total WHOLE shares held at launch (donation-proof)
     address public immutable feeRecipient;
-    address public immutable treasury;        // receives leftover A inventory at graduation
     address public immutable launchpad;       // deployer; the only address that may bind a controller
 
     uint256 public sold;    // WHOLE shares outstanding in the market (redeemable against the reserve)
@@ -74,7 +73,7 @@ contract AgentBondingCurve is ReentrancyGuard {
 
     event Bought(address indexed buyer, uint256 wholeShares, uint256 cost, uint256 fee, uint256 newPrice);
     event Sold(address indexed seller, uint256 wholeShares, uint256 proceeds, uint256 newPrice);
-    event Graduated(address indexed amm, uint256 seedShares, uint256 seedQuote, uint256 seedPrice, uint256 leftoverToTreasury);
+    event Graduated(address indexed amm, uint256 seedShares, uint256 seedQuote, uint256 seedPrice, uint256 leftoverBurned);
     event ControllerBound(address indexed controller);
     event ConversionRedeemed(uint256 wholeSharesBurned, uint256 quoteReleased, bool postGraduation);
 
@@ -92,12 +91,11 @@ contract AgentBondingCurve is ReentrancyGuard {
         uint256 _buyFeeBps,
         uint256 _graduationRaise,
         uint256 _curveSupply,
-        address _feeRecipient,
-        address _treasury
+        address _feeRecipient
     ) {
         require(_shareToken != address(0) && _quoteToken != address(0), "zero addr");
         require(_basePrice > 0 && _graduationRaise > 0 && _curveSupply > 0, "zero param");
-        require(_feeRecipient != address(0) && _treasury != address(0), "zero recipient");
+        require(_feeRecipient != address(0), "zero recipient");
         require(_sellFeeBps <= 1000 && _buyFeeBps <= 1000, "fee too high");
         shareToken = IERC20(_shareToken);
         quoteToken = IERC20(_quoteToken);
@@ -108,7 +106,6 @@ contract AgentBondingCurve is ReentrancyGuard {
         graduationRaise = _graduationRaise;
         curveSupply = _curveSupply;
         feeRecipient = _feeRecipient;
-        treasury = _treasury;
         launchpad = msg.sender;
     }
 
@@ -208,7 +205,9 @@ contract AgentBondingCurve is ReentrancyGuard {
             // Post-graduation: the reserve is the AMM's quote leg. Withdraw the same share of
             // this curve's LP as the A being retired is of circulating A, and burn the share leg
             // that comes back with it — quote-per-circulating-A is unchanged for everyone left.
-            uint256 circulating = shareToken.totalSupply() - shareToken.balanceOf(address(amm));
+            // The AMM's tracked reserve, not its balanceOf: A donated to the pool is not part of
+            // the position and must not shrink `circulating` (which would inflate the release).
+            uint256 circulating = shareToken.totalSupply() - amm.shareReserve();
             require(circulating >= baseAmount, "bad circulating");
             uint256 lp = amm.liquidityBalance(address(this));
             uint256 lpToRemove = (lp * baseAmount) / circulating;
@@ -230,7 +229,7 @@ contract AgentBondingCurve is ReentrancyGuard {
         emit ConversionRedeemed(wholeShares, releasedQuote, graduated);
     }
 
-    // ─── Graduation (seed AMM at ~terminal price; leftover A → treasury) ────────
+    // ─── Graduation (seed AMM at ~terminal price; leftover A burned) ─────────────
 
     function _graduate() internal {
         graduated = true;
@@ -257,7 +256,10 @@ contract AgentBondingCurve is ReentrancyGuard {
         // is locked — {redeemForConversion} is the sole, claim-retiring exception.
         pool.addLiquidity(seedBase, quoteLiquidity, seedBase, quoteLiquidity, block.timestamp);
 
-        if (leftoverBase > 0) shareToken.safeTransfer(treasury, leftoverBase);
+        // Unsold A has no reserve behind it. Handing it to anyone would let them sell it into the
+        // AMM or cross it to B for free, diluting every holder who paid; burning it keeps
+        // "every outstanding A is backed by quote" true after graduation.
+        if (leftoverBase > 0) AgentShareToken(address(shareToken)).burn(leftoverBase);
 
         uint256 seedPrice = quoteLiquidity / seedWhole; // ≈ termPrice
         emit Graduated(address(pool), seedWhole, quoteLiquidity, seedPrice, leftoverBase);

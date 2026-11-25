@@ -25,7 +25,7 @@ import "./KycRegistry.sol";
  *
  * A guarantee is only worth its upgrade key, so this contract has none. There is no `owner`, no
  * proxy, no initializer, no setter — every address and every schedule is `immutable` or fixed at
- * {activate}. The complete list of ways value leaves is:
+ * {activate}, which only the launchpad can call, once. The complete list of ways value leaves is:
  *
  *   1. quote → `capexSink`, inside {convert}, exactly the amount the curve just released;
  *   2. B → the converter, at the fixed ratio derived at activation;
@@ -65,6 +65,7 @@ contract AgentController is ReentrancyGuard {
     address public immutable creator;            // beneficiary of the retained B
     address public immutable capexSink;          // funds the real-world asset; the ONLY quote exit
     IKycRegistry public immutable kyc;           // address(0) ⇒ ungated (testnet only)
+    address public immutable activator;          // the launchpad: the only address that may activate
 
     uint16 public immutable retainedBps;         // creator's share of B (100% - participation_to_sale)
     uint64 public immutable graceSeconds;        // conversion closed for this long after activation
@@ -98,6 +99,7 @@ contract AgentController is ReentrancyGuard {
         address _creator,
         address _capexSink,
         address _kyc,
+        address _activator,
         uint16 _retainedBps,
         uint64 _graceSeconds,
         uint64 _cliffSeconds,
@@ -106,6 +108,7 @@ contract AgentController is ReentrancyGuard {
         require(_agentToken != address(0) && _participationToken != address(0), "zero token");
         require(_quoteToken != address(0) && _curve != address(0), "zero addr");
         require(_creator != address(0) && _capexSink != address(0), "zero recipient");
+        require(_activator != address(0), "zero activator");
         require(_retainedBps < BPS, "retain all"); // some B must remain convertible or A has no floor
         agentToken = IERC20(_agentToken);
         participationToken = IERC20(_participationToken);
@@ -114,6 +117,7 @@ contract AgentController is ReentrancyGuard {
         creator = _creator;
         capexSink = _capexSink;
         kyc = IKycRegistry(_kyc);
+        activator = _activator;
         retainedBps = _retainedBps;
         graceSeconds = _graceSeconds;
         cliffSeconds = _cliffSeconds;
@@ -123,15 +127,20 @@ contract AgentController is ReentrancyGuard {
     // ─── Activation ────────────────────────────────────────────────────────────
 
     /**
-     * @notice Snapshot the B this contract custodies, split it convertible/retained, and start
-     *         the grace and vesting clocks. Permissionless and callable once — it takes no
-     *         parameters, so there is nothing for a caller to choose or manipulate.
+     * @notice Split `totalB` convertible/retained and start the grace and vesting clocks.
+     *         Callable once, and only by the launchpad (which exposes it to its owner).
+     *
+     * Not permissionless, and the amount is stated rather than read: the split is fixed forever
+     * by this one call, so letting anyone trigger it on whatever balance happened to be here
+     * would let a stranger freeze the crossing on a dust balance before the real B arrived.
+     * B beyond `totalB` (a donation) is simply not distributable.
      * @dev Call after the DobProtocol pool has issued B to this address.
      */
-    function activate() external {
+    function activate(uint256 totalB) external {
+        require(msg.sender == activator, "not activator");
         require(!activated, "activated");
-        uint256 totalB = participationToken.balanceOf(address(this));
         require(totalB > 0, "no B");
+        require(participationToken.balanceOf(address(this)) >= totalB, "B not here");
         uint256 aSupply = agentToken.totalSupply();
         require(aSupply > 0, "no A");
 

@@ -26,6 +26,7 @@ async function launchAgent(launchpad, as) {
   await (await lp.launch({
     name: "Providencia EV Hub", symbol: "PROV", supply: SUPPLY, basePrice: BASE_PRICE,
     slope: SLOPE, buyFeeBps: BUY_FEE, sellFeeBps: SELL_FEE, graduationRaise: GRAD_RAISE,
+    creator: (as ?? (await ethers.getSigners())[0]).address, feeRecipient: ethers.ZeroAddress,
   })).wait();
   const l = await launchpad.getLaunch(0);
   return {
@@ -131,9 +132,11 @@ describe("Graduation → AMM (audit fixes)", () => {
     expect(diff * 100n <= termPrice).to.equal(true);
   });
 
-  it("sends leftover inventory to the treasury", async () => {
-    const { share, treasury } = await graduate();
-    expect(await share.balanceOf(treasury.address)).to.be.gt(0n);
+  it("burns leftover inventory instead of handing it to the treasury", async () => {
+    const { share, treasury, amm, curve } = await graduate();
+    expect(await share.balanceOf(treasury.address)).to.equal(0n);
+    expect(await share.balanceOf(await curve.getAddress())).to.equal(0n);
+    expect(await share.totalSupply()).to.equal((await curve.sold()) * WAD + (await amm.shareReserve()));
   });
 
   it("AMM price is immune to token donations (explicit reserves)", async () => {

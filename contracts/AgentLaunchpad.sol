@@ -44,9 +44,19 @@ contract AgentLaunchpad is Ownable, Pausable {
     address public platformTreasury;  // fee recipient + leftover-A treasury
     IKycRegistry public kycRegistry;  // gate applied at the A→B crossing; 0 ⇒ ungated (testnet)
     AgentControllerFactory public controllerFactory; // holds AgentController's creation code (size split)
+    address public pendingControllerFactory;         // proposed replacement, live after FACTORY_DELAY
+    uint256 public pendingControllerFactoryAt;       // earliest time it can be accepted (0 = none)
     uint16 public maxBuyFeeBps = 500;  // 5%
     uint16 public maxSellFeeBps = 500; // 5%
     bool public publicLaunch;          // if false, only authorized launchers may launch
+
+    // Bounds on what the owner can stamp into a controller. Every value is immutable once deployed,
+    // so these caps are what limits a compromised or careless owner key.
+    uint16 public constant MAX_RETAINED_BPS = 5000;     // creator keeps at most half of B
+    uint64 public constant MAX_GRACE = 365 days;
+    uint64 public constant MAX_CLIFF = 4 * 365 days;
+    uint64 public constant MAX_VEST = 4 * 365 days;
+    uint256 public constant FACTORY_DELAY = 2 days;     // notice before a new controller factory applies
     mapping(address => bool) public authorizedLauncher;
 
     struct Launch {
@@ -64,6 +74,8 @@ contract AgentLaunchpad is Ownable, Pausable {
     event TreasuryUpdated(address indexed treasury);
     event KycRegistryUpdated(address indexed registry);
     event ControllerFactoryUpdated(address indexed factory);
+    event ControllerFactoryProposed(address indexed factory, uint256 effectiveAt);
+    event ControllerActivated(uint256 indexed agentId, address indexed controller, uint256 totalB);
     event LauncherAuthorized(address indexed launcher, bool allowed);
     event PublicLaunchSet(bool enabled);
     event ControllerDeployed(uint256 indexed agentId, address indexed controller, address participationToken);
@@ -84,7 +96,9 @@ contract AgentLaunchpad is Ownable, Pausable {
         uint256 slope;           // USDC base units added per whole share sold
         uint256 buyFeeBps;
         uint256 sellFeeBps;
-        uint256 graduationRaise; // USDC (net) that triggers curve → AMM graduation
+        uint256 graduationRaise; // quote (net) that triggers curve → AMM graduation
+        address creator;         // the agent's owner: beneficiary of the retained B (never the caller by default)
+        address feeRecipient;    // curve trading fees (e.g. the agent's fee splitter); 0 ⇒ platformTreasury
     }
 
     modifier canLaunch() {
@@ -122,12 +136,29 @@ contract AgentLaunchpad is Ownable, Pausable {
     }
 
     /// @notice Point at the factory that mints {AgentController} instances.
-    /// @dev Only affects agents that have not been bound yet — a curve honors the FIRST
-    ///      controller bound to it and refuses every later one, so re-pointing this cannot reach
-    ///      an agent whose crossing is already live.
+    /// @dev The first one applies at once (deployment). Replacing it is a two-step change with
+    ///      FACTORY_DELAY of public notice: the factory decides the bytecode of every controller
+    ///      deployed afterwards, so a swap must be visible before it can be used. It still only
+    ///      reaches agents not yet bound — a curve honors the FIRST controller bound to it.
     function setControllerFactory(address _factory) external onlyOwner {
-        controllerFactory = AgentControllerFactory(_factory);
-        emit ControllerFactoryUpdated(_factory);
+        require(_factory != address(0), "zero addr");
+        if (address(controllerFactory) == address(0)) {
+            controllerFactory = AgentControllerFactory(_factory);
+            emit ControllerFactoryUpdated(_factory);
+            return;
+        }
+        pendingControllerFactory = _factory;
+        pendingControllerFactoryAt = block.timestamp + FACTORY_DELAY;
+        emit ControllerFactoryProposed(_factory, pendingControllerFactoryAt);
+    }
+
+    function acceptControllerFactory() external onlyOwner {
+        require(pendingControllerFactory != address(0), "none pending");
+        require(block.timestamp >= pendingControllerFactoryAt, "timelocked");
+        controllerFactory = AgentControllerFactory(pendingControllerFactory);
+        pendingControllerFactory = address(0);
+        pendingControllerFactoryAt = 0;
+        emit ControllerFactoryUpdated(address(controllerFactory));
     }
 
     function setAuthorizedLauncher(address launcher, bool allowed) external onlyOwner {
@@ -153,7 +184,9 @@ contract AgentLaunchpad is Ownable, Pausable {
     {
         require(p.supply > 0 && p.basePrice > 0, "bad supply/price");
         require(p.buyFeeBps <= maxBuyFeeBps && p.sellFeeBps <= maxSellFeeBps, "fee too high");
+        require(p.creator != address(0), "zero creator");
         _validateGraduation(p);
+        address feeTo = p.feeRecipient == address(0) ? platformTreasury : p.feeRecipient;
 
         uint256 baseSupply = p.supply * 1e18;
 
@@ -168,8 +201,7 @@ contract AgentLaunchpad is Ownable, Pausable {
             p.buyFeeBps,
             p.graduationRaise,
             p.supply,           // curveSupply (whole shares)
-            platformTreasury,   // feeRecipient
-            platformTreasury    // treasury (leftover A)
+            feeTo
         );
 
         IERC20(address(share)).safeTransfer(address(bondingCurve), baseSupply);
@@ -179,12 +211,12 @@ contract AgentLaunchpad is Ownable, Pausable {
             token: address(share),
             curve: address(bondingCurve),
             controller: address(0),
-            creator: msg.sender,
+            creator: p.creator,
             name: p.name,
             symbol: p.symbol
         }));
 
-        emit AgentLaunched(agentId, address(share), address(bondingCurve), msg.sender, p.name, p.symbol);
+        emit AgentLaunched(agentId, address(share), address(bondingCurve), p.creator, p.name, p.symbol);
         return (agentId, address(share), address(bondingCurve));
     }
 
@@ -221,8 +253,13 @@ contract AgentLaunchpad is Ownable, Pausable {
         require(l.controller == address(0), "already deployed");
         require(p.participationToken != address(0) && p.capexSink != address(0), "zero addr");
         require(address(controllerFactory) != address(0), "no factory");
-
+        require(p.retainedBps <= MAX_RETAINED_BPS, "retained too high");
+        require(p.graceSeconds <= MAX_GRACE && p.cliffSeconds <= MAX_CLIFF && p.vestSeconds <= MAX_VEST, "schedule too long");
         AgentBondingCurve c = AgentBondingCurve(l.curve);
+        // B must be a token distinct from A and from the quote, and capex must leave the system.
+        require(p.participationToken != l.token && p.participationToken != address(c.quoteToken()), "bad B");
+        require(p.capexSink != l.curve && p.capexSink != address(this), "bad sink");
+
         controller = controllerFactory.deploy(AgentControllerFactory.Args({
             agentToken: l.token,
             participationToken: p.participationToken,
@@ -231,6 +268,7 @@ contract AgentLaunchpad is Ownable, Pausable {
             creator: l.creator,
             capexSink: p.capexSink,
             kyc: address(kycRegistry),
+            activator: address(this),
             retainedBps: p.retainedBps,
             graceSeconds: p.graceSeconds,
             cliffSeconds: p.cliffSeconds,
@@ -241,6 +279,17 @@ contract AgentLaunchpad is Ownable, Pausable {
 
         emit ControllerDeployed(agentId, controller, p.participationToken);
         return controller;
+    }
+
+    /**
+     * @notice Open an agent's crossing: split `totalB` of the B its controller holds and start the
+     *         grace and vesting clocks. Owner-only and once (the controller enforces both).
+     */
+    function activateController(uint256 agentId, uint256 totalB) external onlyOwner {
+        address controller = launches[agentId].controller;
+        require(controller != address(0), "no controller");
+        AgentController(controller).activate(totalB);
+        emit ControllerActivated(agentId, controller, totalB);
     }
 
     /// @dev Ensure graduation is reachable before the curve sells out (leaving inventory to seed

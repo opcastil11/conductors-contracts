@@ -25,7 +25,6 @@ const CURVE = [
   "function shareToken() view returns (address)",
 ];
 const CONTROLLER = [
-  "function activate()",
   "function convert(uint256,uint256) returns (uint256)",
   "function activated() view returns (bool)",
   "function graceEnd() view returns (uint64)",
@@ -70,6 +69,8 @@ async function main() {
     buyFeeBps: 100,
     sellFeeBps: 100,
     graduationRaise: ethers.parseUnits("90", 18), // out of reach for this run — grace, not graduation
+    creator: me.address,
+    feeRecipient: ethers.ZeroAddress,
   })).wait();
   const ev = rc.logs
     .map((l) => { try { return launchpad.interface.parseLog(l); } catch { return null; } })
@@ -109,7 +110,7 @@ async function main() {
 
   const controller = new ethers.Contract(controllerAddr, CONTROLLER, me);
   await (await PT.transfer(controllerAddr, ethers.parseUnits("1000", 18))).wait();
-  await (await controller.activate()).wait();
+  await (await launchpad.activateController(agentId, ethers.parseUnits("1000", 18))).wait();
   const graceEnd = Number(await settled(() => controller.graceEnd(), (g) => Number(g) > 0));
   const now = (await ethers.provider.getBlock("latest")).timestamp;
   console.log(`activated · graceEnd=${graceEnd} (chain now=${now}, ${graceEnd - now}s to go)`);

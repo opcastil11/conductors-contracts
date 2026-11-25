@@ -53,6 +53,7 @@ async function deploy({ gradRaise = GRAD_RAISE_HIGH, retainedBps = RETAINED_BPS,
   await (await launchpad.connect(creator).launch({
     name: "Providencia EV Hub", symbol: "PROV", supply: SUPPLY, basePrice: BASE_PRICE,
     slope: SLOPE, buyFeeBps: BUY_FEE, sellFeeBps: SELL_FEE, graduationRaise: gradRaise,
+    creator: creator.address, feeRecipient: ethers.ZeroAddress,
   })).wait();
   const l = await launchpad.getLaunch(0);
   const share = await ethers.getContractAt("AgentShareToken", l.token);
@@ -78,7 +79,7 @@ async function attachController(f, { activate = true, seedB = B_TOTAL } = {}) {
   const addr = (await f.launchpad.getLaunch(0)).controller;
   const controller = await ethers.getContractAt("AgentController", addr);
   if (seedB > 0n) await (await f.bToken.mint(addr, seedB)).wait();
-  if (activate) await (await controller.activate()).wait();
+  if (activate) await (await f.launchpad.activateController(0, seedB)).wait();
   return controller;
 }
 
@@ -152,7 +153,7 @@ describe("AgentController — binding", () => {
     expect(await controller.convertibleB()).to.equal((B_TOTAL * 7000n) / 10000n);
     expect(await controller.retainedB()).to.equal((B_TOTAL * 3000n) / 10000n);
     expect(await controller.aSupplyAtActivation()).to.equal(SUPPLY * WAD);
-    await expect(controller.activate()).to.be.revertedWith("activated");
+    await expect(f.launchpad.activateController(0, B_TOTAL)).to.be.revertedWith("activated");
   });
 });
 
@@ -237,14 +238,14 @@ describe("AgentController — conversion before graduation", () => {
   });
 
   it("rations the convertible B — the pool cannot be over-drawn", async () => {
-    // Retain 99%: only 1% of B is convertible, so the ratio is 0.01 B per A.
-    const f = await deploy({ retainedBps: 9900n });
+    // Retain the 50% cap: half of B is convertible, so the ratio is 0.5 B per A.
+    const f = await deploy({ retainedBps: 5000n });
     const controller = await attachController(f);
     await (await f.kyc.setApproved(f.alice.address, true)).wait();
     await buy(f, f.alice, 10_000n);
-    expect(await controller.quoteConversion(1_000n)).to.equal(10n * WAD);
+    expect(await controller.quoteConversion(1_000n)).to.equal(500n * WAD);
     await (await convert(f, controller, f.alice, 1_000n)).wait();
-    expect(await f.bToken.balanceOf(f.alice.address)).to.equal(10n * WAD);
+    expect(await f.bToken.balanceOf(f.alice.address)).to.equal(500n * WAD);
   });
 
   it("refuses a controller that retains everything (A would have no floor at all)", async () => {
@@ -351,5 +352,101 @@ describe("AgentController — the creator's retained B", () => {
     for (const forbidden of ["owner", "transferOwnership", "sweep", "rescue", "withdraw", "setCapexSink", "upgradeTo"]) {
       expect(names, `AgentController must not expose ${forbidden}`).to.not.include(forbidden);
     }
+  });
+});
+
+describe("Hardening — activation, launch params and owner bounds", () => {
+  it("only the launchpad (its owner) can activate, and dust sent first cannot freeze the split", async () => {
+    const f = await deploy();
+    const controller = await attachController(f, { activate: false, seedB: 0n });
+    // A stranger front-runs with 1 wei of B and tries to open the crossing on it.
+    await (await f.bToken.mint(await controller.getAddress(), 1n)).wait();
+    await expect(controller.connect(f.alice).activate(1n)).to.be.revertedWith("not activator");
+    await expect(f.launchpad.connect(f.alice).activateController(0, 1n)).to.be.reverted;
+    // The real B arrives; the owner activates on the stated amount, not on whatever is there.
+    await (await f.bToken.mint(await controller.getAddress(), B_TOTAL)).wait();
+    await (await f.launchpad.activateController(0, B_TOTAL)).wait();
+    expect(await controller.convertibleB()).to.equal((B_TOTAL * 7000n) / 10000n);
+  });
+
+  it("refuses to activate on B that has not arrived", async () => {
+    const f = await deploy();
+    await attachController(f, { activate: false, seedB: B_TOTAL / 2n });
+    await expect(f.launchpad.activateController(0, B_TOTAL)).to.be.revertedWith("B not here");
+  });
+
+  it("records the explicit creator, not the caller, and pays retained B to it", async () => {
+    const f = await deploy();
+    const l = await f.launchpad.getLaunch(0);
+    expect(l.creator).to.equal(f.creator.address);
+    const [, , , , , , stranger] = await ethers.getSigners();
+    await (await f.launchpad.launch({
+      name: "X", symbol: "X", supply: SUPPLY, basePrice: BASE_PRICE, slope: SLOPE,
+      buyFeeBps: BUY_FEE, sellFeeBps: SELL_FEE, graduationRaise: GRAD_RAISE_HIGH,
+      creator: stranger.address, feeRecipient: f.bob.address,
+    })).wait();
+    const l1 = await f.launchpad.getLaunch(1);
+    expect(l1.creator).to.equal(stranger.address);
+    const c1 = await ethers.getContractAt("AgentBondingCurve", l1.curve);
+    expect(await c1.feeRecipient()).to.equal(f.bob.address);
+    await expect(f.launchpad.launch({
+      name: "Y", symbol: "Y", supply: SUPPLY, basePrice: BASE_PRICE, slope: SLOPE,
+      buyFeeBps: BUY_FEE, sellFeeBps: SELL_FEE, graduationRaise: GRAD_RAISE_HIGH,
+      creator: ethers.ZeroAddress, feeRecipient: ethers.ZeroAddress,
+    })).to.be.revertedWith("zero creator");
+  });
+
+  it("bounds what the owner can stamp into a controller", async () => {
+    const f = await deploy();
+    const base = {
+      participationToken: await f.bToken.getAddress(), capexSink: f.capexSink.address,
+      retainedBps: 3000, graceSeconds: 0, cliffSeconds: 0, vestSeconds: 0,
+    };
+    await expect(f.launchpad.deployController(0, { ...base, retainedBps: 5001 })).to.be.revertedWith("retained too high");
+    await expect(f.launchpad.deployController(0, { ...base, graceSeconds: 366n * 86400n })).to.be.revertedWith("schedule too long");
+    await expect(f.launchpad.deployController(0, { ...base, vestSeconds: 5n * 365n * 86400n })).to.be.revertedWith("schedule too long");
+    await expect(f.launchpad.deployController(0, { ...base, participationToken: await f.share.getAddress() })).to.be.revertedWith("bad B");
+    await expect(f.launchpad.deployController(0, { ...base, participationToken: await f.dobx.getAddress() })).to.be.revertedWith("bad B");
+    await expect(f.launchpad.deployController(0, { ...base, capexSink: await f.curve.getAddress() })).to.be.revertedWith("bad sink");
+  });
+
+  it("puts a replacement controller factory behind a 2-day timelock", async () => {
+    const f = await deploy();
+    const original = await f.launchpad.controllerFactory();
+    const other = await (await ethers.getContractFactory("AgentControllerFactory")).deploy();
+    await (await f.launchpad.setControllerFactory(await other.getAddress())).wait();
+    expect(await f.launchpad.controllerFactory()).to.equal(original);
+    await expect(f.launchpad.acceptControllerFactory()).to.be.revertedWith("timelocked");
+    await time.increase(2n * 86400n);
+    await (await f.launchpad.acceptControllerFactory()).wait();
+    expect(await f.launchpad.controllerFactory()).to.equal(await other.getAddress());
+  });
+
+  it("burns unsold A at graduation, so nobody holds unbacked A that could cross to B", async () => {
+    const f = await deploy({ gradRaise: GRAD_RAISE_LOW });
+    const supplyBefore = await f.share.totalSupply();
+    let shares = 0n;
+    while (!(await f.curve.graduated())) { await buy(f, f.alice, 5_000n); shares += 5_000n; }
+    const amm = await ethers.getContractAt("AgentAMM", await f.curve.amm());
+    expect(await f.share.balanceOf(f.platformTreasury.address)).to.equal(0n);
+    // What is left is exactly what buyers hold plus the AMM's seed — every A has quote behind it.
+    expect(await f.share.totalSupply()).to.equal(shares * WAD + (await amm.shareReserve()));
+    expect(await f.share.totalSupply()).to.be.lt(supplyBefore);
+  });
+
+  it("ignores A donated to the AMM when sizing a post-graduation release", async () => {
+    const f = await deploy({ gradRaise: GRAD_RAISE_LOW });
+    const controller = await attachController(f, { activate: false });
+    await (await f.kyc.setApproved(f.alice.address, true)).wait();
+    while (!(await f.curve.graduated())) await buy(f, f.alice, 5_000n);
+    await (await f.launchpad.activateController(0, B_TOTAL)).wait();
+    const amm = await f.curve.amm();
+    const snap = await ethers.provider.send("evm_snapshot", []);
+    await (await convert(f, controller, f.alice, 100n)).wait();
+    const clean = await controller.capexFunded();
+    await ethers.provider.send("evm_revert", [snap]);
+    await (await f.share.connect(f.alice).transfer(amm, 1_000n * WAD)).wait(); // donation
+    await (await convert(f, controller, f.alice, 100n)).wait();
+    expect(await controller.capexFunded()).to.equal(clean);
   });
 });

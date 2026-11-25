@@ -25,13 +25,13 @@ contract StakeHandler is Test {
         stake.stake(amt);
     }
 
-    function doRequest() external {
-        try stake.requestWithdraw() {} catch {}
+    function doRequest(uint256 amt) external {
+        amt = bound(amt, 1, 1_000_000e6);
+        try stake.requestWithdraw(amt) {} catch {}
     }
 
-    function doWithdraw(uint256 amt) external {
-        amt = bound(amt, 1, 1_000_000e6);
-        try stake.withdraw(amt) {} catch {}
+    function doWithdraw() external {
+        try stake.withdraw() {} catch {}
     }
 
     function doSlash(uint256 amt) external {
