@@ -41,6 +41,13 @@ contract OperatorStake is Ownable, ReentrancyGuard {
     ///         request would be a standing permission to exit instantly whenever a slash loomed.
     uint256 public constant WITHDRAW_WINDOW = 7 days;
     uint256 public constant MAX_COOLDOWN = 90 days;
+    // The attester can hold a matured withdrawal while it builds a slash case, for at most
+    // MAX_FREEZE per freeze; a new cooldown applies only after COOLDOWN_DELAY of notice.
+    uint256 public constant MAX_FREEZE = 30 days;
+    uint256 public constant COOLDOWN_DELAY = 7 days;
+    uint256 public frozenUntil;
+    uint256 public pendingCooldown;
+    uint256 public pendingCooldownAt;
 
     event Staked(address indexed operator, uint256 amount, uint256 total);
     event WithdrawRequested(uint256 amount, uint256 unlockAt);
@@ -50,6 +57,8 @@ contract OperatorStake is Ownable, ReentrancyGuard {
     event AttesterUpdated(address indexed attester);
     event AttesterProposed(address indexed attester, uint256 effectiveAt);
     event CooldownUpdated(uint256 cooldown);
+    event CooldownProposed(uint256 cooldown, uint256 effectiveAt);
+    event Frozen(uint256 until, string reason);
 
     modifier onlyOperator() {
         require(msg.sender == operator, "not operator");
@@ -96,6 +105,7 @@ contract OperatorStake is Ownable, ReentrancyGuard {
     /// @notice Withdraw the requested amount, once matured and before the window lapses. One shot.
     function withdraw() external onlyOperator nonReentrant {
         require(unlockAt != 0 && block.timestamp >= unlockAt, "cooldown");
+        require(block.timestamp >= frozenUntil, "frozen");
         require(block.timestamp <= unlockAt + WITHDRAW_WINDOW, "request lapsed");
         uint256 amount = pendingAmount <= staked ? pendingAmount : staked;
         require(amount > 0, "nothing to withdraw");
@@ -145,10 +155,30 @@ contract OperatorStake is Ownable, ReentrancyGuard {
         emit AttesterUpdated(attester);
     }
 
+    /// @notice Hold withdrawals for up to MAX_FREEZE while a slash is prepared (0 lifts it). A
+    ///         pending request keeps its maturity; if the freeze outlasts its window it re-arms
+    ///         from the end of the freeze, so freezing never forfeits the operator's request.
+    function freeze(uint256 duration, string calldata reason) external {
+        require(msg.sender == attester, "not attester");
+        require(duration <= MAX_FREEZE, "freeze too long");
+        frozenUntil = block.timestamp + duration;
+        if (unlockAt != 0 && unlockAt + WITHDRAW_WINDOW < frozenUntil) unlockAt = frozenUntil;
+        emit Frozen(frozenUntil, reason);
+    }
+
     function setCooldown(uint256 _cooldown) external onlyOwner {
         require(_cooldown <= MAX_COOLDOWN, "cooldown too long");
-        cooldown = _cooldown;
-        emit CooldownUpdated(_cooldown);
+        pendingCooldown = _cooldown;
+        pendingCooldownAt = block.timestamp + COOLDOWN_DELAY;
+        emit CooldownProposed(_cooldown, pendingCooldownAt);
+    }
+
+    function acceptCooldown() external onlyOwner {
+        require(pendingCooldownAt != 0, "none pending");
+        require(block.timestamp >= pendingCooldownAt, "timelocked");
+        cooldown = pendingCooldown;
+        pendingCooldownAt = 0;
+        emit CooldownUpdated(cooldown);
     }
 
     /// @notice True while a withdrawal request is maturing.

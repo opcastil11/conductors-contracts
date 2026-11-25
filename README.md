@@ -55,7 +55,7 @@ flowchart LR
     C -- "trading fees" --> F["AgentFeeSplitter<br/>65% agent · 35% platform"]
 
     L -- "<code>deployController()</code>" --> K["AgentController<br/>immutable, ownerless"]
-    H(("Holder")) -- "convert(A)" --> K
+    H(("Holder")) -- "requestConversion(A) → claim()" --> K
     K -- "burn A + release reserve" --> C
     K -- "DOBX" --> X["capexSink"]
     K -- "B" --> H

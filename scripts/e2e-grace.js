@@ -5,7 +5,7 @@
  * grace clock was never exercised against real block timestamps. Grace is not a lockup detail: it
  * is what leaves A alone as an attention market during the window when the pool is paying nothing,
  * and "the pool has not started distributing, so there is nothing to cross into" is only true if
- * `convert()` genuinely reverts.
+ * `requestConversion()` genuinely reverts.
  *
  * The script launches its own agent, attaches a controller with a SHORT grace (default 180s),
  * activates, asserts the revert, waits out the clock on chain time, and asserts the same call then
@@ -25,7 +25,7 @@ const CURVE = [
   "function shareToken() view returns (address)",
 ];
 const CONTROLLER = [
-  "function convert(uint256,uint256) returns (uint256)",
+  "function requestConversion(uint256) returns (uint256)",
   "function activated() view returns (bool)",
   "function graceEnd() view returns (uint64)",
   "function convertibleB() view returns (uint256)",
@@ -54,7 +54,7 @@ async function settled(read, ready, tries = 16, delayMs = 2500) {
 
 async function main() {
   const [me] = await ethers.getSigners();
-  const graceSeconds = Number(process.env.GRACE_SECONDS || 180);
+  const graceSeconds = Number(process.env.GRACE_SECONDS || 172800 /* MIN_GRACE */);
   const shares = BigInt(process.env.SHARES || "200");
   const launchpad = await ethers.getContractAt("AgentLaunchpad", process.env.LAUNCHPAD || deployment.launchpad, me);
   console.log(`signer=${me.address} grace=${graceSeconds}s`);
@@ -120,14 +120,14 @@ async function main() {
   await (await a.approve(controllerAddr, shares * 10n ** 18n)).wait();
   let reverted = null;
   try {
-    await controller.convert.staticCall(1n, 0n);
+    await controller.requestConversion.staticCall(1n);
   } catch (e) {
     reverted = e.shortMessage || e.reason || e.message;
   }
   console.log(`convert during grace → ${reverted ?? "NO REVERT"}`);
   if (!reverted || !/grace/i.test(reverted)) throw new Error(`expected a "grace period" revert, got: ${reverted}`);
 
-  // Compliance sits after the grace check in `convert()`, so half 1 revert-tests grace whether or
+  // Compliance sits after the grace check in `requestConversion()`, so half 1 revert-tests grace whether or
   // not this address is cleared. Half 2 needs the mirror written, or it would revert on KYC and
   // look like grace never expired.
   const kyc = new ethers.Contract(deployment.kycRegistry, [
@@ -144,10 +144,10 @@ async function main() {
   console.log(`waiting ${waitFor}s for the grace clock…`);
   await sleep(waitFor * 1000);
 
-  const tx = await controller.convert(1n, 0n);
+  const tx = await controller.requestConversion(1n); // B arrives on claim() after the batch settles
   await tx.wait();
-  const bBal = await settled(() => PT.balanceOf(me.address), (v) => v > 0n);
-  console.log(`convert after grace → OK · B received=${f(bBal)} tx=${tx.hash}`);
+  const queued = await settled(() => a.balanceOf(controllerAddr), (v) => v > 0n);
+  console.log(`request after grace → OK · A queued=${f(queued)} tx=${tx.hash} (claim after the batch settles, ~36 h)`);
   console.log("OK — grace shut the crossing and then opened it, on real block timestamps");
 }
 

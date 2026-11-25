@@ -18,8 +18,8 @@ import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
  * rotated). `release` is permissionless — anyone can push the accrued balance out at the ratio in
  * force at that moment.
  *
- * The curve also sends its leftover A to the same address it uses as treasury; any token other
- * than the quote token is not a fee and goes to the platform whole.
+ * Any token other than the quote token is not a fee and goes to the platform whole (the curve
+ * burns its leftover A at graduation; it no longer sends it here).
  */
 contract AgentFeeSplitter is Ownable, ReentrancyGuard {
     using SafeERC20 for IERC20;
@@ -30,9 +30,14 @@ contract AgentFeeSplitter is Ownable, ReentrancyGuard {
     address public agent;
     address public platform;
     uint16 public agentBps;
+    // A new split is announced BPS_DELAY ahead, so it cannot be slipped in right before a release.
+    uint256 public constant BPS_DELAY = 2 days;
+    uint16 public pendingAgentBps;
+    uint256 public pendingAgentBpsAt;
 
     event Released(address indexed token, uint256 toAgent, uint256 toPlatform);
     event AgentBpsUpdated(uint16 agentBps);
+    event AgentBpsProposed(uint16 agentBps, uint256 effectiveAt);
     event AgentUpdated(address indexed agent);
     event PlatformUpdated(address indexed platform);
 
@@ -51,8 +56,17 @@ contract AgentFeeSplitter is Ownable, ReentrancyGuard {
 
     function setAgentBps(uint16 _agentBps) external onlyOwner {
         require(_agentBps >= MIN_AGENT_BPS && _agentBps <= 10000, "bad bps");
-        agentBps = _agentBps;
-        emit AgentBpsUpdated(_agentBps);
+        pendingAgentBps = _agentBps;
+        pendingAgentBpsAt = block.timestamp + BPS_DELAY;
+        emit AgentBpsProposed(_agentBps, pendingAgentBpsAt);
+    }
+
+    function acceptAgentBps() external onlyOwner {
+        require(pendingAgentBps != 0, "none pending");
+        require(block.timestamp >= pendingAgentBpsAt, "timelocked");
+        agentBps = pendingAgentBps;
+        pendingAgentBps = 0;
+        emit AgentBpsUpdated(agentBps);
     }
 
     function setPlatform(address _platform) external onlyOwner {

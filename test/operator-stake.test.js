@@ -111,4 +111,30 @@ describe("OperatorStake — bond + slash for revenue under-reporting", () => {
     await stake.connect(owner).acceptAttester();
     expect(await stake.attester()).to.equal(stranger.address);
   });
+
+  it("the attester can hold a matured exit while it builds a case, bounded, without voiding it", async () => {
+    const { owner, operator, attester, stranger, stake } = await fixture();
+    await stake.connect(operator).stake(10_000n * E6);
+    await stake.connect(operator).requestWithdraw(10_000n * E6);
+    await bump(COOLDOWN);
+    await expect(stake.connect(stranger).freeze(86400, "x")).to.be.revertedWith("not attester");
+    await expect(stake.connect(owner).freeze(86400, "x")).to.be.revertedWith("not attester");
+    await expect(stake.connect(attester).freeze(31 * 86400, "x")).to.be.revertedWith("freeze too long");
+    await stake.connect(attester).freeze(30 * 86400, "reviewing reports");
+    await expect(stake.connect(operator).withdraw()).to.be.reverted;
+    await bump(30 * 86400);
+    await stake.connect(operator).withdraw(); // the request re-armed from the freeze's end
+    expect(await stake.staked()).to.equal(0n);
+  });
+
+  it("a new cooldown applies only after a week of notice", async () => {
+    const { owner, stranger, stake } = await fixture();
+    await expect(stake.connect(stranger).setCooldown(1)).to.be.reverted;
+    await stake.connect(owner).setCooldown(1);
+    expect(await stake.cooldown()).to.equal(COOLDOWN);
+    await expect(stake.connect(owner).acceptCooldown()).to.be.revertedWith("timelocked");
+    await bump(7 * 24 * 3600);
+    await stake.connect(owner).acceptCooldown();
+    expect(await stake.cooldown()).to.equal(1n);
+  });
 });

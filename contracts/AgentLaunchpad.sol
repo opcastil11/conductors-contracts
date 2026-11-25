@@ -42,7 +42,7 @@ contract AgentLaunchpad is Ownable, Pausable {
      *      around.
      */
     IERC20 public immutable quoteToken; // fixed: a new quote token is a new launchpad
-    address public platformTreasury;  // fee recipient + leftover-A treasury
+    address public platformTreasury;  // fee recipient (the curve burns its leftover A at graduation)
     IKycRegistry public kycRegistry;  // gate applied at the A→B crossing; 0 ⇒ ungated (testnet)
     AgentCurveFactory public immutable curveFactory; // created here; holds the curve's creation code (size split)
     AgentControllerFactory public controllerFactory; // holds AgentController's creation code (size split)
@@ -59,6 +59,10 @@ contract AgentLaunchpad is Ownable, Pausable {
     uint64 public constant MAX_CLIFF = 4 * 365 days;
     uint64 public constant MAX_VEST = 4 * 365 days;
     uint256 public constant FACTORY_DELAY = 2 days;     // notice before a new controller factory applies
+    uint256 public constant CONFIG_DELAY = 2 days;      // notice before a new treasury or KYC registry applies
+    // Conversion stays closed at least this long after activation, so every controller's
+    // parameters (B token, capex sink, split, schedule) are public before any A can cross into it.
+    uint64 public constant MIN_GRACE = 2 days;
     mapping(address => bool) public authorizedLauncher;
 
     struct Launch {
@@ -80,6 +84,12 @@ contract AgentLaunchpad is Ownable, Pausable {
     event LauncherAuthorized(address indexed launcher, bool allowed);
     event PublicLaunchSet(bool enabled);
     event ControllerDeployed(uint256 indexed agentId, address indexed controller, address participationToken);
+    event ControllerConfigured(
+        uint256 indexed agentId, address indexed controller, address participationToken, address capexSink,
+        address kyc, uint16 retainedBps, uint64 graceSeconds, uint64 cliffSeconds, uint64 vestSeconds
+    );
+    event ControllerBRecovered(uint256 indexed agentId, address indexed controller, uint256 amount);
+    event ConfigProposed(bytes32 indexed key, address value, uint256 effectiveAt);
     event AgentLaunched(
         uint256 indexed agentId,
         address indexed token,
@@ -118,18 +128,50 @@ contract AgentLaunchpad is Ownable, Pausable {
     // ─── Admin ────────────────────────────────────────────────────────────────
 
 
+    // Treasury and KYC registry changes are two-step with CONFIG_DELAY of public notice. The registry
+    // can be set at once only before the first launch (fresh deployment wiring).
+    address public pendingTreasury;
+    uint256 public pendingTreasuryAt;
+    address public pendingKycRegistry;
+    uint256 public pendingKycRegistryAt;
+    bool public kycRegistryPending;
+
     function setPlatformTreasury(address _treasury) external onlyOwner {
         require(_treasury != address(0), "zero addr");
-        platformTreasury = _treasury;
-        emit TreasuryUpdated(_treasury);
+        pendingTreasury = _treasury;
+        pendingTreasuryAt = block.timestamp + CONFIG_DELAY;
+        emit ConfigProposed("treasury", _treasury, pendingTreasuryAt);
+    }
+
+    function acceptPlatformTreasury() external onlyOwner {
+        require(pendingTreasury != address(0), "none pending");
+        require(block.timestamp >= pendingTreasuryAt, "timelocked");
+        platformTreasury = pendingTreasury;
+        pendingTreasury = address(0);
+        emit TreasuryUpdated(platformTreasury);
     }
 
     /// @notice Set the KYC registry stamped into controllers deployed from here on.
     /// @dev Each {AgentController} holds its registry `immutable`, so this never retro-changes
     ///      the gate of an agent already deployed.
     function setKycRegistry(address _registry) external onlyOwner {
-        kycRegistry = IKycRegistry(_registry);
-        emit KycRegistryUpdated(_registry);
+        if (launches.length == 0) {
+            kycRegistry = IKycRegistry(_registry);
+            emit KycRegistryUpdated(_registry);
+            return;
+        }
+        pendingKycRegistry = _registry;
+        pendingKycRegistryAt = block.timestamp + CONFIG_DELAY;
+        kycRegistryPending = true;
+        emit ConfigProposed("kyc", _registry, pendingKycRegistryAt);
+    }
+
+    function acceptKycRegistry() external onlyOwner {
+        require(kycRegistryPending, "none pending");
+        require(block.timestamp >= pendingKycRegistryAt, "timelocked");
+        kycRegistry = IKycRegistry(pendingKycRegistry);
+        kycRegistryPending = false;
+        emit KycRegistryUpdated(pendingKycRegistry);
     }
 
     /// @notice Point at the factory that mints {AgentController} instances.
@@ -236,9 +278,9 @@ contract AgentLaunchpad is Ownable, Pausable {
      * token as an immutable. Binding is one-shot in the curve, so this can only ever succeed
      * once per agent: there is no path to swap in a second controller later.
      *
-     * The quote token is read off the CURVE, not from this contract's current setting, so an
-     * agent launched before a {setQuoteToken} switch still gets a controller wired to the token
-     * its own curve actually holds.
+     * The quote token is read off the CURVE (it is immutable here too; a new quote token means a
+     * new launchpad). Before binding, B's supply must be fine enough for the crossing to ever
+     * open: at least one B unit per whole A the curve could put in circulation, after retention.
      */
     function deployController(uint256 agentId, ControllerParams calldata p)
         external
@@ -251,11 +293,14 @@ contract AgentLaunchpad is Ownable, Pausable {
         require(p.participationToken != address(0) && p.capexSink != address(0), "zero addr");
         require(address(controllerFactory) != address(0), "no factory");
         require(p.retainedBps <= MAX_RETAINED_BPS, "retained too high");
+        require(p.graceSeconds >= MIN_GRACE, "grace too short");
         require(p.graceSeconds <= MAX_GRACE && p.cliffSeconds <= MAX_CLIFF && p.vestSeconds <= MAX_VEST, "schedule too long");
         AgentBondingCurve c = AgentBondingCurve(l.curve);
         // B must be a token distinct from A and from the quote, and capex must leave the system.
         require(p.participationToken != l.token && p.participationToken != address(c.quoteToken()), "bad B");
         require(p.capexSink != l.curve && p.capexSink != address(this), "bad sink");
+        uint256 bSupply = IERC20(p.participationToken).totalSupply();
+        require(bSupply - (bSupply * p.retainedBps) / 10_000 >= c.curveSupply(), "B too coarse");
 
         controller = controllerFactory.deploy(AgentControllerFactory.Args({
             agentToken: l.token,
@@ -275,7 +320,17 @@ contract AgentLaunchpad is Ownable, Pausable {
         l.controller = controller;
 
         emit ControllerDeployed(agentId, controller, p.participationToken);
+        emit ControllerConfigured(agentId, controller, p.participationToken, p.capexSink, address(kycRegistry),
+            p.retainedBps, p.graceSeconds, p.cliffSeconds, p.vestSeconds);
         return controller;
+    }
+
+    /// @notice Return the B held by a controller that was never activated to the agent's creator.
+    function recoverControllerB(uint256 agentId) external onlyOwner {
+        address controller = launches[agentId].controller;
+        require(controller != address(0), "no controller");
+        uint256 amount = AgentController(controller).recoverB();
+        emit ControllerBRecovered(agentId, controller, amount);
     }
 
     /**

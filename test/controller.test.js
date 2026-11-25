@@ -32,7 +32,12 @@ const RETAINED_BPS = 3000n;    // creator keeps 30% ⇒ every A converts at 0.7 
 /** The curve's exact integral over `k` shares starting at position `from`. */
 const integral = (from, k) => k * BASE_PRICE + (SLOPE * (2n * from + k - 1n) * k) / 2n;
 
-async function deploy({ gradRaise = GRAD_RAISE_LOW, retainedBps = RETAINED_BPS, grace = 0n, cliff = 0n, vest = 0n } = {}) {
+const DAY = 86400n;
+const MIN_GRACE = 2n * DAY;
+const COLLECT = 12n * 3600n;
+const PRICING = 24n * 3600n;
+
+async function deploy({ gradRaise = GRAD_RAISE_LOW, retainedBps = RETAINED_BPS, grace = MIN_GRACE, cliff = 0n, vest = 0n } = {}) {
   const [owner, platformTreasury, creator, capexSink, alice, bob] = await ethers.getSigners();
 
   const dobx = await (await ethers.getContractFactory("DOBX")).deploy(owner.address);
@@ -76,8 +81,12 @@ async function graduate(f, who = f.alice) {
   await buy(f, who, lo - sold);
 }
 
-/** Deploy the controller, seed it with B, and (unless told not to) graduate and activate it. */
-async function attachController(f, { activate = true, seedB = B_TOTAL } = {}) {
+/**
+ * Deploy the controller, seed it with B, and (unless told not to) graduate, activate it and wait
+ * out the grace period. B exists before the controller does (the launchpad checks its supply).
+ */
+async function attachController(f, { activate = true, seedB = B_TOTAL, bSupply = B_TOTAL, waitGrace = true } = {}) {
+  if ((await f.bToken.totalSupply()) === 0n) await (await f.bToken.mint(f.owner.address, bSupply)).wait();
   await (await f.launchpad.deployController(0, {
     participationToken: await f.bToken.getAddress(),
     capexSink: f.capexSink.address,
@@ -88,11 +97,11 @@ async function attachController(f, { activate = true, seedB = B_TOTAL } = {}) {
   })).wait();
   const addr = (await f.launchpad.getLaunch(0)).controller;
   const controller = await ethers.getContractAt("AgentController", addr);
-  if (seedB > 0n) await (await f.bToken.mint(addr, seedB)).wait();
+  if (seedB > 0n) await (await f.bToken.transfer(addr, seedB)).wait();
   if (activate) {
     await graduate(f);
     await (await f.launchpad.activateController(0, seedB)).wait();
-    await time.increase(3601n); // the conversion rate needs an hour of AMM history (TWAP)
+    await time.increase((waitGrace ? f.grace : 0n) + 3601n);
   }
   return controller;
 }
@@ -104,9 +113,21 @@ async function buy(f, who, shares) {
   await (await f.curve.connect(who).buy(shares, total, DL)).wait();
 }
 
-async function convert(f, controller, who, shares, minQuote = 0n) {
+/** Request into the collecting batch and return its id. */
+async function request(f, controller, who, shares) {
   await (await f.share.connect(who).approve(await controller.getAddress(), shares * WAD)).wait();
-  return controller.connect(who).convert(shares, minQuote);
+  const id = await controller.connect(who).requestConversion.staticCall(shares);
+  await (await controller.connect(who).requestConversion(shares)).wait();
+  return id;
+}
+
+/** The whole crossing for one requester: request → batch closes → pricing window → claim. */
+async function convert(f, controller, who, shares) {
+  const id = await request(f, controller, who, shares);
+  await time.increase(COLLECT);
+  await (await controller.poke()).wait();
+  await time.increase(PRICING);
+  return controller.connect(who).claim(id);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -158,7 +179,7 @@ describe("AgentController — binding", () => {
   it("lets nobody but the bound controller burn A for conversion", async () => {
     const f = await deploy();
     await attachController(f);
-    await expect(f.curve.connect(f.alice).redeemForConversion(1n, 0n)).to.be.revertedWith("not controller");
+    await expect(f.curve.connect(f.alice).redeemForConversion(1n, 0n, 0n)).to.be.revertedWith("not controller");
   });
 
   it("activates once, snapshotting the cap table split", async () => {
@@ -176,7 +197,7 @@ describe("AgentController — binding", () => {
 describe("AgentController — the gates", () => {
   it("closes conversion for the whole grace period", async () => {
     const f = await deploy({ grace: 365n * 24n * 3600n });
-    const controller = await attachController(f);
+    const controller = await attachController(f, { waitGrace: false });
     await (await f.kyc.setApproved(f.alice.address, true)).wait();
 
     await expect(convert(f, controller, f.alice, 100n)).to.be.revertedWith("grace period");
@@ -217,7 +238,7 @@ describe("AgentController — the crossing opens only after graduation", () => {
     const per1k = (1_000n * WAD * num) / den;
     expect(await controller.quoteConversion(1_000n)).to.equal(per1k);
     await (await convert(f, controller, f.alice, 1_000n)).wait();
-    expect(await f.bToken.balanceOf(f.alice.address)).to.equal(per1k);
+    expect(await f.bToken.balanceOf(f.alice.address)).to.be.closeTo(per1k, per1k / 1000n);
   });
 
   it("refuses a controller that retains everything (A would have no floor at all)", async () => {
@@ -225,12 +246,25 @@ describe("AgentController — the crossing opens only after graduation", () => {
     await expect(attachController(f, { activate: false })).to.be.reverted;
   });
 
-  it("honors minQuoteToCapex", async () => {
+  it("lets a request be cancelled while its batch collects, and not after it closes", async () => {
     const f = await deploy();
     const controller = await attachController(f);
     await (await f.kyc.setApproved(f.alice.address, true)).wait();
-    await (await f.share.connect(f.alice).approve(await controller.getAddress(), 1_000n * WAD)).wait();
-    await expect(controller.connect(f.alice).convert(1_000n, 10n ** 30n)).to.be.reverted;
+    const before = await f.share.balanceOf(f.alice.address);
+    const id = await request(f, controller, f.alice, 500n);
+    await (await controller.connect(f.alice).cancelRequest(id, 200n)).wait();
+    expect(await f.share.balanceOf(f.alice.address)).to.equal(before - 300n * WAD);
+    await time.increase(COLLECT);
+    await (await controller.poke()).wait();
+    await expect(controller.connect(f.alice).cancelRequest(id, 100n)).to.be.revertedWith("batch closed");
+    await expect(controller.connect(f.alice).claim(id)).to.be.revertedWith("not settled");
+    expect(await controller.claimable(id, f.alice.address)).to.equal(0n);
+    await time.increase(PRICING);
+    const due = await controller.claimable(id, f.alice.address); // still 0: nobody settled it yet
+    expect(due).to.equal(0n);
+    await (await controller.connect(f.alice).claim(id)).wait();
+    expect(await f.bToken.balanceOf(f.alice.address)).to.be.gt(0n);
+    await expect(controller.connect(f.alice).claim(id)).to.be.revertedWith("nothing to claim");
   });
 });
 
@@ -282,14 +316,14 @@ describe("AgentController — the creator's retained B", () => {
 
   it("releases nothing before the cliff", async () => {
     const f = await deploy({ cliff: YEAR, vest: 2n * YEAR });
-    const controller = await attachController(f);
+    const controller = await attachController(f, { waitGrace: false });
     expect(await controller.vestedRetained()).to.equal(0n);
     await expect(controller.releaseRetained()).to.be.revertedWith("nothing vested");
   });
 
   it("vests linearly after the cliff and pays out pull-based", async () => {
     const f = await deploy({ cliff: YEAR, vest: 2n * YEAR });
-    const controller = await attachController(f);
+    const controller = await attachController(f, { waitGrace: false });
     const retained = await controller.retainedB();
 
     await time.increase(YEAR + YEAR); // cliff + half the vesting window
@@ -330,13 +364,26 @@ describe("Hardening — activation, launch params and owner bounds", () => {
     const controller = await attachController(f, { activate: false, seedB: 0n });
     await graduate(f);
     // A stranger front-runs with 1 wei of B and tries to open the crossing on it.
-    await (await f.bToken.mint(await controller.getAddress(), 1n)).wait();
+    await (await f.bToken.transfer(await controller.getAddress(), 1n)).wait();
     await expect(controller.connect(f.alice).activate(1n)).to.be.revertedWith("not activator");
     await expect(f.launchpad.connect(f.alice).activateController(0, 1n)).to.be.reverted;
     // The real B arrives; the owner activates on the stated amount, not on whatever is there.
-    await (await f.bToken.mint(await controller.getAddress(), B_TOTAL)).wait();
+    await (await f.bToken.transfer(await controller.getAddress(), B_TOTAL - 1n)).wait();
+    await (await f.launchpad.activateController(0, B_TOTAL - 1n)).wait();
+    expect(await controller.convertibleB()).to.equal(B_TOTAL - 1n - ((B_TOTAL - 1n) * 3000n) / 10000n);
+  });
+
+  it("returns B parked in a controller that was never activated, and only then", async () => {
+    const f = await deploy();
+    const controller = await attachController(f, { activate: false });
+    await expect(f.launchpad.connect(f.alice).recoverControllerB(0)).to.be.reverted;
+    await (await f.launchpad.recoverControllerB(0)).wait();
+    expect(await f.bToken.balanceOf(f.creator.address)).to.equal(B_TOTAL);
+    expect(await f.bToken.balanceOf(await controller.getAddress())).to.equal(0n);
+    await (await f.bToken.connect(f.creator).transfer(await controller.getAddress(), B_TOTAL)).wait();
+    await graduate(f);
     await (await f.launchpad.activateController(0, B_TOTAL)).wait();
-    expect(await controller.convertibleB()).to.equal((B_TOTAL * 7000n) / 10000n);
+    await expect(f.launchpad.recoverControllerB(0)).to.be.revertedWith("activated");
   });
 
   it("refuses to activate on B that has not arrived", async () => {
@@ -370,8 +417,9 @@ describe("Hardening — activation, launch params and owner bounds", () => {
     const f = await deploy();
     const base = {
       participationToken: await f.bToken.getAddress(), capexSink: f.capexSink.address,
-      retainedBps: 3000, graceSeconds: 0, cliffSeconds: 0, vestSeconds: 0,
+      retainedBps: 3000, graceSeconds: MIN_GRACE, cliffSeconds: 0, vestSeconds: 0,
     };
+    await expect(f.launchpad.deployController(0, { ...base, graceSeconds: MIN_GRACE - 1n })).to.be.revertedWith("grace too short");
     await expect(f.launchpad.deployController(0, { ...base, retainedBps: 5001 })).to.be.revertedWith("retained too high");
     await expect(f.launchpad.deployController(0, { ...base, graceSeconds: 366n * 86400n })).to.be.revertedWith("schedule too long");
     await expect(f.launchpad.deployController(0, { ...base, vestSeconds: 5n * 365n * 86400n })).to.be.revertedWith("schedule too long");
@@ -404,21 +452,18 @@ describe("Hardening — activation, launch params and owner bounds", () => {
     expect(await f.share.totalSupply()).to.be.lt(supplyBefore);
   });
 
-  it("ignores A donated to the AMM when sizing a post-graduation release", async () => {
+  it("counts A donated to the AMM as gone, never as the curve's own position", async () => {
     const f = await deploy({ gradRaise: GRAD_RAISE_LOW });
-    const controller = await attachController(f, { activate: false });
+    const controller = await attachController(f);
     await (await f.kyc.setApproved(f.alice.address, true)).wait();
-    while (!(await f.curve.graduated())) await buy(f, f.alice, 5_000n);
-    await (await f.launchpad.activateController(0, B_TOTAL)).wait();
-    await time.increase(3601n);
     const amm = await f.curve.amm();
-    const snap = await ethers.provider.send("evm_snapshot", []);
-    await (await convert(f, controller, f.alice, 100n)).wait();
-    const clean = await controller.capexFunded();
-    await ethers.provider.send("evm_revert", [snap]);
+    const [num0, den0] = await controller.conversionRate();
     await (await f.share.connect(f.alice).transfer(amm, 1_000n * WAD)).wait(); // donation
+    const [num1, den1] = await controller.conversionRate();
+    expect(num1).to.equal(num0);
+    expect(den1).to.equal(den0 - 1_000n * WAD); // out of reach, like burned A — and nothing more
     await (await convert(f, controller, f.alice, 100n)).wait();
-    expect(await controller.capexFunded()).to.equal(clean);
+    expect(await f.bToken.balanceOf(f.alice.address)).to.be.closeTo((100n * WAD * num1) / den1, num1 / den1 * WAD / 1000n);
   });
 });
 
@@ -433,73 +478,90 @@ describe("Hardening — precision, reachability and fixed roles", () => {
     expect(await controller.bConverted()).to.equal(await controller.convertibleB());
   });
 
-  it("waits for an hour of AMM history before quoting a rate", async () => {
-    const f = await deploy();
-    await attachController(f, { activate: false });
-    await graduate(f);
-    await (await f.launchpad.activateController(0, B_TOTAL)).wait();
-    const controller = await ethers.getContractAt("AgentController", (await f.launchpad.getLaunch(0)).controller);
-    await (await f.kyc.setApproved(f.alice.address, true)).wait();
-    await expect(convert(f, controller, f.alice, 100n)).to.be.revertedWith("twap warming");
-    await time.increase(3601n);
-    await expect(convert(f, controller, f.alice, 100n)).to.not.be.reverted;
-  });
-
-  it("a griefer who skews the average cannot trap or divert B: conversion waits until the pool settles", async () => {
+  it("splits a batch pro rata among its requesters, to the last unit of B", async () => {
     const f = await deploy();
     const controller = await attachController(f);
-    await (await f.kyc.setApproved(f.alice.address, true)).wait();
-    const amm = await ethers.getContractAt("AgentAMM", await f.curve.amm());
-    const fair = await controller.quoteConversion(1_000n);
-    // bob buys A out of the pool, holds it for an hour, then sells it back.
-    await (await f.dobx.connect(f.bob).approve(await amm.getAddress(), ethers.MaxUint256)).wait();
-    await (await amm.connect(f.bob).swapQuoteForShare(10n ** 21n, 0n, DL)).wait();
-    await time.increase(3600n);
-    await (await f.share.connect(f.bob).approve(await amm.getAddress(), ethers.MaxUint256)).wait();
-    await (await amm.connect(f.bob).swapShareForQuote(await f.share.balanceOf(f.bob.address), 0n, DL)).wait();
-    expect(await controller.poolSettled()).to.equal(false);
-    await expect(convert(f, controller, f.alice, 1_000n)).to.be.revertedWith("pool unsettled");
-    await time.increase(3600n);
-    expect(await controller.poolSettled()).to.equal(true);
-    expect(await controller.quoteConversion(1_000n)).to.be.closeTo(fair, fair / 1000n);
-    await (await convert(f, controller, f.alice, (await f.share.balanceOf(f.alice.address)) / WAD)).wait();
-    expect(await controller.bConverted()).to.equal(await controller.convertibleB());
+    for (const u of [f.alice, f.bob]) await (await f.kyc.setApproved(u.address, true)).wait();
+    await (await f.share.connect(f.alice).transfer(f.bob.address, 777n * WAD)).wait();
+    const id = await request(f, controller, f.alice, 1_333n);
+    expect(await request(f, controller, f.bob, 777n)).to.equal(id);
+    expect(await controller.settlesAt(id)).to.be.gt(0n);
+    await time.increase(COLLECT + PRICING);
+    await (await controller.poke()).wait(); // closes it — pricing starts only now
+    await expect(controller.connect(f.alice).claim(id)).to.be.revertedWith("not settled");
+    await time.increase(PRICING);
+    await (await controller.connect(f.bob).claim(id)).wait();
+    await (await controller.connect(f.alice).claim(id)).wait();
+    const a = await f.bToken.balanceOf(f.alice.address);
+    const b = await f.bToken.balanceOf(f.bob.address);
+    expect(a + b).to.equal((await controller.batches(id)).bOut);
+    expect(a + b).to.equal(await controller.bConverted());
+    expect(a * 777n).to.be.closeTo(b * 1_333n, 1_333n * 777n);
   });
 
-  it("refuses to convert while the spot is pushed away from the hour's average in either direction", async () => {
+  it("prices a batch only after it closes: a skew around the request moves nothing", async () => {
     const f = await deploy();
     const controller = await attachController(f);
     await (await f.kyc.setApproved(f.alice.address, true)).wait();
     const amm = await ethers.getContractAt("AgentAMM", await f.curve.amm());
     const snap = await ethers.provider.send("evm_snapshot", []);
-    await (await f.share.connect(f.alice).approve(await amm.getAddress(), ethers.MaxUint256)).wait();
-    await (await amm.connect(f.alice).swapShareForQuote(2_000n * WAD, 0n, DL)).wait(); // dump
-    await time.increase(60n);
-    await expect(convert(f, controller, f.alice, 10n)).to.be.revertedWith("pool unsettled");
+    await (await convert(f, controller, f.alice, 1_000n)).wait();
+    const clean = await f.bToken.balanceOf(f.alice.address);
     await ethers.provider.send("evm_revert", [snap]);
-    await (await f.dobx.connect(f.alice).approve(await amm.getAddress(), ethers.MaxUint256)).wait();
-    await (await amm.connect(f.alice).swapQuoteForShare(10n ** 21n, 0n, DL)).wait(); // buy-out
+    // bob buys A out of the pool right as alice requests, and unwinds before the batch closes.
+    await (await f.dobx.connect(f.bob).approve(await amm.getAddress(), ethers.MaxUint256)).wait();
+    await (await f.share.connect(f.bob).approve(await amm.getAddress(), ethers.MaxUint256)).wait();
+    await (await amm.connect(f.bob).swapQuoteForShare(10n ** 21n, 0n, DL)).wait();
+    const id = await request(f, controller, f.alice, 1_000n);
+    await time.increase(COLLECT - 60n);
+    await (await amm.connect(f.bob).swapShareForQuote(await f.share.balanceOf(f.bob.address), 0n, DL)).wait();
     await time.increase(60n);
-    await expect(convert(f, controller, f.alice, 10n)).to.be.revertedWith("pool unsettled");
+    await (await controller.poke()).wait();
+    await time.increase(PRICING);
+    await (await controller.connect(f.alice).claim(id)).wait();
+    expect(await f.bToken.balanceOf(f.alice.address)).to.be.closeTo(clean, clean / 200n);
   });
 
-  it("convertWithLimits enforces the B floor and the deadline", async () => {
+  it("an hour-long skew inside the pricing window moves the rate by roughly 1/24 of it", async () => {
     const f = await deploy();
     const controller = await attachController(f);
     await (await f.kyc.setApproved(f.alice.address, true)).wait();
-    await (await f.share.connect(f.alice).approve(await controller.getAddress(), ethers.MaxUint256)).wait();
-    const q = await controller.quoteConversion(100n);
-    await expect(controller.connect(f.alice).convertWithLimits(100n, 0n, q + 1n, DL)).to.be.revertedWith("slippage");
-    await expect(controller.connect(f.alice).convertWithLimits(100n, 0n, q, 1n)).to.be.revertedWith("expired");
-    await expect(controller.connect(f.alice).convertWithLimits(100n, 0n, q, DL)).to.not.be.reverted;
+    const amm = await ethers.getContractAt("AgentAMM", await f.curve.amm());
+    const snap = await ethers.provider.send("evm_snapshot", []);
+    await (await convert(f, controller, f.alice, 1_000n)).wait();
+    const clean = await f.bToken.balanceOf(f.alice.address);
+    await ethers.provider.send("evm_revert", [snap]);
+    const id = await request(f, controller, f.alice, 1_000n);
+    await time.increase(COLLECT);
+    await (await controller.poke()).wait();
+    await (await f.dobx.connect(f.bob).approve(await amm.getAddress(), ethers.MaxUint256)).wait();
+    await (await f.share.connect(f.bob).approve(await amm.getAddress(), ethers.MaxUint256)).wait();
+    await (await amm.connect(f.bob).swapQuoteForShare(10n ** 21n, 0n, DL)).wait();
+    await time.increase(3600n);
+    await (await amm.connect(f.bob).swapShareForQuote(await f.share.balanceOf(f.bob.address), 0n, DL)).wait();
+    await time.increase(PRICING - 3600n);
+    await (await controller.connect(f.alice).claim(id)).wait();
+    const got = await f.bToken.balanceOf(f.alice.address);
+    const d = got > clean ? got - clean : clean - got;
+    expect(d * 100n / clean).to.be.lt(5n);
   });
 
-
-  it("refuses to activate on B too coarse to split per whole A", async () => {
+  it("settles even if nobody claims for long, skipping the capex floor after the grace day", async () => {
     const f = await deploy();
-    await attachController(f, { activate: false, seedB: 1000n });
-    await graduate(f);
-    await expect(f.launchpad.activateController(0, 1000n)).to.be.revertedWith("B too coarse");
+    const controller = await attachController(f);
+    await (await f.kyc.setApproved(f.alice.address, true)).wait();
+    const id = await request(f, controller, f.alice, 100n);
+    await time.increase(COLLECT);
+    await (await controller.poke()).wait();
+    await time.increase(PRICING + 2n * DAY);
+    await (await controller.connect(f.alice).claim(id)).wait();
+    expect(await f.bToken.balanceOf(f.alice.address)).to.be.gt(0n);
+    expect(await f.dobx.balanceOf(f.capexSink.address)).to.be.gt(0n);
+  });
+
+  it("refuses to bind B too coarse to split per whole A", async () => {
+    const f = await deploy();
+    await expect(attachController(f, { activate: false, seedB: 1000n, bSupply: 1000n })).to.be.revertedWith("B too coarse");
   });
 
   it("refuses a goal that would leave too little inventory to seed the AMM at the terminal price", async () => {
@@ -547,6 +609,24 @@ describe("Hardening — precision, reachability and fixed roles", () => {
     await (await amm.connect(f.alice).addLiquidity(shares, quote * 2n, 0n, 0n, DL)).wait();
     await (await convert(f, controller, f.alice, 300n)).wait();
     expect(await controller.capexFunded()).to.be.closeTo(clean, clean / 1000n);
+  });
+
+  it("puts the treasury and, once agents exist, the KYC registry behind a 2-day timelock", async () => {
+    const f = await deploy();
+    const t0 = await f.launchpad.platformTreasury();
+    await (await f.launchpad.setPlatformTreasury(f.bob.address)).wait();
+    expect(await f.launchpad.platformTreasury()).to.equal(t0);
+    await expect(f.launchpad.acceptPlatformTreasury()).to.be.revertedWith("timelocked");
+    const k0 = await f.launchpad.kycRegistry();
+    await (await f.launchpad.setKycRegistry(ethers.ZeroAddress)).wait(); // a launch exists → proposal
+    expect(await f.launchpad.kycRegistry()).to.equal(k0);
+    await expect(f.launchpad.acceptKycRegistry()).to.be.revertedWith("timelocked");
+    await time.increase(2n * DAY);
+    await (await f.launchpad.acceptPlatformTreasury()).wait();
+    await (await f.launchpad.acceptKycRegistry()).wait();
+    expect(await f.launchpad.platformTreasury()).to.equal(f.bob.address);
+    expect(await f.launchpad.kycRegistry()).to.equal(ethers.ZeroAddress);
+    await expect(f.launchpad.connect(f.alice).setPlatformTreasury(f.alice.address)).to.be.reverted;
   });
 
   it("the quote token is fixed for the launchpad's life", async () => {

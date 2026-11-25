@@ -1,3 +1,4 @@
+const { time } = require("@nomicfoundation/hardhat-network-helpers");
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
 
@@ -38,7 +39,13 @@ describe("AgentFeeSplitter — A's trading fees, agent 65 / platform 35", () => 
     await expect(splitter.connect(stranger).setAgentBps(7000)).to.be.reverted;
     await expect(splitter.connect(owner).setAgentBps(4999)).to.be.revertedWith("bad bps");
     await expect(splitter.connect(owner).setAgentBps(10001)).to.be.revertedWith("bad bps");
+    const before = await splitter.agentBps();
     await splitter.connect(owner).setAgentBps(8000);
+    expect(await splitter.agentBps()).to.equal(before); // announced, not applied
+    await expect(splitter.connect(owner).acceptAgentBps()).to.be.revertedWith("timelocked");
+    await expect(splitter.connect(stranger).acceptAgentBps()).to.be.reverted;
+    await time.increase(2 * 86400);
+    await splitter.connect(owner).acceptAgentBps();
     expect(await splitter.agentBps()).to.equal(8000);
   });
 

@@ -61,9 +61,10 @@ against the A supply.
 The two previous runs used `graceDays 0`, meaning the grace clock had never been exercised
 against real block timestamps. The script activates with a short grace period, checks that
 `convert()` **reverts** with a message containing "grace", waits out the clock, and checks that
-the *same call* to the *same controller* now succeeds. Result: 0.7 B per A with 30% retained.
+the *same call* to the *same controller* now succeeds. (Since the batched crossing the entry point is
+`requestConversion()`, grace is at least 2 days, and B arrives on `claim()` once the batch settles.) Result: 0.7 B per A with 30% retained.
 
-> Detail the script documents in the code: `convert()` checks `activated → grace →
+> Detail the script documents in the code: `requestConversion()` checks `activated → grace →
 > wholeShares > 0 → kyc`, in that order. The first half is grace-only even if the address is
 > not approved; the second half needs the mirror written, or it would revert on KYC and it would **look like**
 > the grace period never expired.

@@ -4,6 +4,7 @@ pragma solidity ^0.8.24;
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/math/Math.sol";
 import "./AgentBondingCurve.sol";
 import "./KycRegistry.sol";
 
@@ -27,9 +28,11 @@ import "./KycRegistry.sol";
  * proxy, no initializer, no setter — every address and every schedule is `immutable` or fixed at
  * {activate}, which only the launchpad can call, once. The complete list of ways value leaves is:
  *
- *   1. quote → `capexSink`, inside {convert}, exactly the amount the curve just released;
- *   2. B → the converter, at the fixed ratio derived at activation;
- *   3. B → `creator`, never more than the vesting schedule allows.
+ *   1. quote → `capexSink`, inside a batch settlement, exactly the amount the curve just released;
+ *   2. B → a converter, pro rata to the A it committed to a settled batch;
+ *   3. B → `creator`, never more than the vesting schedule allows;
+ *   4. A → a requester who cancels before the batch closes (their own A, back);
+ *   5. B → `creator`, before activation only ({recoverB}): the crossing never opened.
  *
  * Each is formula-bound with no caller discretion. Nothing else can move. (A corollary: tokens
  * sent here by mistake are stuck forever — the cost of having no rescue function is exactly what
@@ -87,18 +90,50 @@ contract AgentController is ReentrancyGuard {
     uint256 public aBurned;        // whole A shares retired through this controller
     uint256 public capexFunded;    // quote forwarded to capexSink
 
-    // The rate is B still unconverted over A still outside the curve's pool position, recomputed
-    // on every conversion. A fixed denominator counted the A the curve seeded into the AMM — burned
-    // on conversion without ever claiming B — and left that share of B unreachable. The curve's
-    // position is valued both at the AMM's spot and at its 1-hour time-weighted A per LP unit and
-    // the lower rate is paid; a conversion is refused while the spot sits more than
-    // MAX_DEVIATION_BPS from the average: moving the rate means moving the pool AND holding it. The
-    // conversion that leaves under one whole A outside takes whatever rounding left behind.
+    // ─── Batched conversion ────────────────────────────────────────────────────
+    //
+    // The rate is B still unconverted over A still outside the curve's pool position, and how much
+    // A that position holds depends on the AMM — so any rate read at one instant can be moved by
+    // whoever moves the pool at that instant. Conversions are therefore committed first and priced
+    // later: requests collect for COLLECT_WINDOW, the batch then closes (snapshotting the AMM's
+    // accumulator), and it settles at the pool's time-weighted A per LP unit over the PRICING_WINDOW
+    // that follows the close. Nobody who requested knows that average, moving it means holding
+    // the pool off its price for a whole day against arbitrage, and there is no band that a
+    // passing trade could use to pause the crossing. Everyone in a batch gets the same rate.
+    uint64 public constant COLLECT_WINDOW = 12 hours;
+    uint64 public constant PRICING_WINDOW = 24 hours;
+    // The capex leg is a proportional LP withdrawal at the moment of settlement, so a same-block
+    // skew of the pool could shrink it. It is floored against the pool's 1-hour average; if that
+    // floor keeps failing for SETTLE_GRACE after the batch is due, liveness wins and it is waived.
     uint64 public constant TWAP_WINDOW = 1 hours;
-    uint256 public constant MAX_DEVIATION_BPS = 300;
+    uint256 public constant CAPEX_TOLERANCE_BPS = 500;
+    uint64 public constant SETTLE_GRACE = 1 days;
+    uint256 public constant MAX_SETTLE_PER_CALL = 8;
+
+    struct Batch {
+        uint64 openedAt;       // first request
+        uint64 closedAt;       // 0 while collecting
+        bool settled;
+        uint256 closeCum;      // AMM accumulator at close
+        uint256 shares;        // whole A shares requested
+        uint256 bOut;          // B assigned at settlement
+        uint256 claimedShares;
+        uint256 claimedB;
+    }
+
+    mapping(uint256 => Batch) public batches;
+    mapping(uint256 => mapping(address => uint256)) public requested; // batch → account → whole A
+    uint256 public openBatch = 1;      // the batch collecting requests
+    uint256 public nextToSettle = 1;   // batches settle strictly in order
+    uint256 public queuedShares;       // whole A held here for unsettled batches
 
     event Activated(uint256 totalB, uint256 convertibleB, uint256 retainedB, uint256 aSupply, uint64 graceEnd);
-    event Converted(address indexed account, uint256 wholeSharesA, uint256 bOut, uint256 quoteToCapex);
+    event ConversionRequested(address indexed account, uint256 indexed batchId, uint256 wholeSharesA);
+    event ConversionCancelled(address indexed account, uint256 indexed batchId, uint256 wholeSharesA);
+    event BatchClosed(uint256 indexed batchId, uint256 wholeSharesA);
+    event BatchSettled(uint256 indexed batchId, uint256 wholeSharesA, uint256 bOut, uint256 quoteToCapex, uint256 aPerLp);
+    event Claimed(address indexed account, uint256 indexed batchId, uint256 bOut);
+    event BRecovered(address indexed creator, uint256 amount);
     event RetainedReleased(address indexed creator, uint256 amount);
 
     constructor(
@@ -171,106 +206,212 @@ contract AgentController is ReentrancyGuard {
         emit Activated(totalB, convertibleB, retainedB, aSupply, graceEnd);
     }
 
+    /**
+     * @notice Send every B held here back to the creator, before activation only. A crossing that
+     *         can never open (B too coarse, wrong amount sent) would otherwise trap that B; after
+     *         activation this path is closed and the no-rescue guarantee above is unconditional.
+     */
+    function recoverB() external nonReentrant returns (uint256 amount) {
+        require(msg.sender == activator, "not activator");
+        require(!activated, "activated");
+        amount = participationToken.balanceOf(address(this));
+        require(amount > 0, "no B");
+        participationToken.safeTransfer(creator, amount);
+        emit BRecovered(creator, amount);
+    }
+
     // ─── The crossing ──────────────────────────────────────────────────────────
 
     /**
-     * @notice Convert `wholeShares` of A into B, one way and forever. The A is burned by the
-     *         curve, which releases the reserve backing it straight through to `capexSink`.
-     * @param wholeShares whole A shares to cross (the caller must approve this contract first)
-     * @param minQuoteToCapex floor on the reserve released; see {AgentBondingCurve-redeemForConversion}
-     * @return bOut participation tokens delivered to the caller
+     * @notice Commit `wholeShares` of A to the batch now collecting. The A moves here at once and
+     *         crosses at that batch's settlement rate; until the batch closes it can be cancelled.
+     * @return batchId the batch to {claim} from once it settles
      */
-    function convert(uint256 wholeShares, uint256 minQuoteToCapex)
-        external
-        nonReentrant
-        returns (uint256 bOut)
-    {
-        return _convert(wholeShares, minQuoteToCapex, 1);
-    }
-
-    /// @notice {convert} with a floor on the B received and a deadline.
-    function convertWithLimits(uint256 wholeShares, uint256 minQuoteToCapex, uint256 minBOut, uint256 deadline)
-        external
-        nonReentrant
-        returns (uint256 bOut)
-    {
-        require(block.timestamp <= deadline, "expired");
-        return _convert(wholeShares, minQuoteToCapex, minBOut);
-    }
-
-    function _convert(uint256 wholeShares, uint256 minQuoteToCapex, uint256 minBOut) internal returns (uint256 bOut) {
+    function requestConversion(uint256 wholeShares) external nonReentrant returns (uint256 batchId) {
         require(activated, "not activated");
         require(block.timestamp >= graceEnd, "grace period");
         require(wholeShares > 0, "zero");
+        require(bConverted < convertibleB, "convertible exhausted");
         require(address(kyc) == address(0) || kyc.isApproved(msg.sender), "kyc required");
+        _close();
+        batchId = openBatch;
+        Batch storage b = batches[batchId];
+        if (b.openedAt == 0) b.openedAt = uint64(block.timestamp);
+        b.shares += wholeShares;
+        requested[batchId][msg.sender] += wholeShares;
+        queuedShares += wholeShares;
+        agentToken.safeTransferFrom(msg.sender, address(this), wholeShares * SHARE_UNIT);
+        emit ConversionRequested(msg.sender, batchId, wholeShares);
+    }
 
-        uint256 aIn = wholeShares * SHARE_UNIT;
-        (uint256 num, uint256 den, bool settled) = _rate();
-        require(settled, "pool unsettled");
-        require(den > 0, "no outstanding A");
-        bOut = (aIn * num) / den;
-        // Terminal sweep: this conversion leaves less than one whole A outside the curve's pool.
-        if (bOut > num || den < aIn + SHARE_UNIT) bOut = num;
-        require(bOut > 0, "dust");
-        require(bOut >= minBOut, "slippage");
-        require(bConverted + bOut <= convertibleB, "convertible exhausted");
+    /// @notice Take back A from the batch still collecting (not once it has closed).
+    function cancelRequest(uint256 batchId, uint256 wholeShares) external nonReentrant {
+        _close();
+        require(batchId == openBatch, "batch closed");
+        require(wholeShares > 0 && requested[batchId][msg.sender] >= wholeShares, "not requested");
+        requested[batchId][msg.sender] -= wholeShares;
+        Batch storage b = batches[batchId];
+        b.shares -= wholeShares;
+        if (b.shares == 0) b.openedAt = 0; // an emptied batch restarts its window with the next request
+        queuedShares -= wholeShares;
+        agentToken.safeTransfer(msg.sender, wholeShares * SHARE_UNIT);
+        emit ConversionCancelled(msg.sender, batchId, wholeShares);
+    }
 
+    /// @notice Close the collecting batch if its window has run, and settle what is due. Anyone.
+    function poke() external nonReentrant returns (uint256 settledCount) {
+        _close();
+        settledCount = _settleDue(type(uint256).max);
+    }
+
+    /**
+     * @notice Collect the B of `batchId` (settling it, and any earlier batch, first if due).
+     *         Pro rata to the A requested; the last claimant takes the rounding remainder.
+     */
+    function claim(uint256 batchId) external nonReentrant returns (uint256 bOut) {
+        _close();
+        _settleDue(batchId);
+        Batch storage b = batches[batchId];
+        require(b.settled, "not settled");
+        uint256 shares = requested[batchId][msg.sender];
+        require(shares > 0, "nothing to claim");
+        requested[batchId][msg.sender] = 0;
+        b.claimedShares += shares;
+        bOut = b.claimedShares == b.shares ? b.bOut - b.claimedB : (shares * b.bOut) / b.shares;
+        b.claimedB += bOut;
+        if (bOut > 0) participationToken.safeTransfer(msg.sender, bOut);
+        emit Claimed(msg.sender, batchId, bOut);
+    }
+
+    function _close() internal {
+        Batch storage b = batches[openBatch];
+        if (b.openedAt == 0 || b.shares == 0 || block.timestamp < b.openedAt + COLLECT_WINDOW) return;
+        b.closedAt = uint64(block.timestamp);
+        b.closeCum = curve.amm().aPerLpCumulativeNow();
+        emit BatchClosed(openBatch, b.shares);
+        openBatch++;
+    }
+
+    function _due(uint256 id) internal view returns (bool) {
+        Batch storage b = batches[id];
+        return id < openBatch && b.closedAt != 0 && !b.settled && block.timestamp >= b.closedAt + PRICING_WINDOW;
+    }
+
+    /// @dev Settle due batches in order, up to `upTo` and MAX_SETTLE_PER_CALL of them.
+    function _settleDue(uint256 upTo) internal returns (uint256 n) {
+        while (n < MAX_SETTLE_PER_CALL && nextToSettle <= upTo) {
+            if (!_due(nextToSettle)) break;
+            _settle(nextToSettle);
+            nextToSettle++;
+            n++;
+        }
+    }
+
+    function _settle(uint256 id) internal {
+        Batch storage b = batches[id];
+        AgentAMM pool = curve.amm();
+        uint256 avg = (pool.aPerLpCumulativeNow() - b.closeCum) / (block.timestamp - b.closedAt);
+        uint256 lp = pool.liquidityBalance(address(curve));
+        uint256 aIn = b.shares * SHARE_UNIT;
+        uint256 outside = _outside(pool, lp, avg);
+        uint256 num = convertibleB - bConverted;
+
+        uint256 bOut;
+        uint256 lpOut;
+        // Terminal sweep: under one whole A would remain outside — this batch takes what is left.
+        if (outside < aIn + SHARE_UNIT) {
+            bOut = num;
+            lpOut = lp;
+        } else {
+            bOut = (aIn * num) / outside;
+            lpOut = (lp * aIn) / outside;
+        }
+
+        uint256 minQuote;
+        if (block.timestamp < b.closedAt + PRICING_WINDOW + SETTLE_GRACE) {
+            minQuote = (_fairQuote(pool, lpOut, avg) * (BPS - CAPEX_TOLERANCE_BPS)) / BPS;
+        }
+
+        b.settled = true;
+        b.bOut = bOut;
         bConverted += bOut;
-        aBurned += wholeShares;
+        aBurned += b.shares;
+        queuedShares -= b.shares;
 
-        // Pull the A, hand it to the curve to burn, and take back the reserve it frees.
-        agentToken.safeTransferFrom(msg.sender, address(this), aIn);
         IERC20(address(agentToken)).forceApprove(address(curve), aIn);
-        uint256 released = curve.redeemForConversion(wholeShares, minQuoteToCapex);
-
+        uint256 released = curve.redeemForConversion(b.shares, lpOut, minQuote);
         // Straight through — this contract is a conduit for capex, never a treasury.
         if (released > 0) {
             capexFunded += released;
             quoteToken.safeTransfer(capexSink, released);
         }
-        participationToken.safeTransfer(msg.sender, bOut);
-
-        emit Converted(msg.sender, wholeShares, bOut, released);
+        emit BatchSettled(id, b.shares, bOut, released, avg);
     }
 
-    function _rate() internal view returns (uint256 num, uint256 den, bool settled) {
-        AgentAMM pool = curve.amm();
+    /// @dev A that can still claim B: the supply, less the curve's pool position valued at `avg`,
+    ///      less A nobody can ever bring here (untracked A sitting in the AMM, A held by the curve,
+    ///      A donated to this contract). Never below the A already queued, which certainly claims.
+    function _outside(AgentAMM pool, uint256 lp, uint256 avg) internal view returns (uint256) {
+        uint256 excluded = (lp * avg) / 1e18 + agentToken.balanceOf(address(curve));
+        uint256 ammBal = agentToken.balanceOf(address(pool));
+        uint256 tracked = pool.shareReserve();
+        if (ammBal > tracked) excluded += ammBal - tracked;
+        uint256 queued = queuedShares * SHARE_UNIT;
+        uint256 held = agentToken.balanceOf(address(this));
+        if (held > queued) excluded += held - queued;
         uint256 supply = agentToken.totalSupply();
-        uint256 spot = pool.aPerLpSpot();
-        uint256 avg = pool.twapAPerLp(TWAP_WINDOW);
-        uint256 lp = pool.liquidityBalance(address(curve));
-        uint256 curveSpot = (lp * spot) / 1e18;
-        uint256 curveAvg = (lp * avg) / 1e18;
-        uint256 denSpot = supply > curveSpot ? supply - curveSpot : 0;
-        uint256 denAvg = supply > curveAvg ? supply - curveAvg : 0;
-        // The larger denominator (the lower rate) of the two valuations: buying A out of the pool
-        // right before converting cannot raise the rate, and neither can a skewed average.
-        den = denSpot > denAvg ? denSpot : denAvg;
-        // The band is measured on the pool's A per LP unit, not on the denominator: the max above
-        // already stops anyone being paid over the fair rate, and the band only has to stop a
-        // skewed average from depressing someone else's. On the denominator a crashed A (most of
-        // it back in the pool) would let a trade of a fraction of a percent close the crossing.
-        settled = spot * BPS <= avg * (BPS + MAX_DEVIATION_BPS) && spot * BPS >= avg * (BPS - MAX_DEVIATION_BPS);
-        num = convertibleB - bConverted;
+        uint256 outside = supply > excluded ? supply - excluded : 0;
+        return outside > queued ? outside : queued;
     }
 
-    /// @notice Whether a conversion would be accepted now (spot within MAX_DEVIATION_BPS of the TWAP).
-    function poolSettled() external view returns (bool settled) {
-        (, , settled) = _rate();
+    /// @dev Quote that `lpOut` would release at the pool's 1-hour average composition: quote per
+    ///      LP unit is (k / L²) / (A per LP unit), and only swaps move A per LP. Falls back to the
+    ///      batch average if the short average is unavailable.
+    function _fairQuote(AgentAMM pool, uint256 lpOut, uint256 batchAvg) internal view returns (uint256) {
+        uint256 avg = batchAvg;
+        try pool.twapAPerLp(TWAP_WINDOW) returns (uint256 short) { if (short > 0) avg = short; } catch {}
+        uint256 L = pool.totalLiquidity();
+        if (avg == 0 || L == 0 || lpOut == 0) return 0;
+        uint256 perL = Math.mulDiv(pool.shareReserve(), pool.quoteReserve(), L); // k / L
+        return Math.mulDiv(Math.mulDiv(lpOut, perL, L), 1e18, avg);
     }
 
-    /// @notice The current B-per-A rate as (unconverted B, A outside the curve's pool position).
+    // ─── Views (estimates; never revert) ───────────────────────────────────────
+
+    /// @notice An estimate of the B-per-A rate as (unconverted B, A outside the curve's position),
+    ///         at the pool's 1-hour average. The binding rate is fixed only at each batch's settlement.
     function conversionRate() public view returns (uint256 num, uint256 den) {
         if (!activated) return (0, 0);
-        (num, den, ) = _rate();
+        AgentAMM pool = curve.amm();
+        uint256 avg;
+        try pool.twapAPerLp(TWAP_WINDOW) returns (uint256 a) { avg = a; } catch { avg = pool.aPerLpSpot(); }
+        num = convertibleB - bConverted;
+        den = _outside(pool, pool.liquidityBalance(address(curve)), avg);
     }
 
-    /// @notice B delivered for `wholeShares` of A at the current rate.
+    /// @notice Estimated B for `wholeShares` of A at {conversionRate}.
     function quoteConversion(uint256 wholeShares) external view returns (uint256) {
         (uint256 num, uint256 den) = conversionRate();
         if (den == 0) return 0;
         uint256 out = (wholeShares * SHARE_UNIT * num) / den;
-        return out > num ? num : out; // the terminal sweep is not quoted
+        return out > num ? num : out;
+    }
+
+    /// @notice When `batchId` can settle (0 if it is not collecting or closed yet).
+    function settlesAt(uint256 batchId) external view returns (uint256) {
+        Batch storage b = batches[batchId];
+        if (b.closedAt != 0) return uint256(b.closedAt) + PRICING_WINDOW;
+        if (b.openedAt != 0) return uint256(b.openedAt) + COLLECT_WINDOW + PRICING_WINDOW;
+        return 0;
+    }
+
+    /// @notice B `account` can claim from `batchId` now (0 until it settles).
+    function claimable(uint256 batchId, address account) external view returns (uint256) {
+        Batch storage b = batches[batchId];
+        uint256 shares = requested[batchId][account];
+        if (!b.settled || shares == 0) return 0;
+        if (b.claimedShares + shares == b.shares) return b.bOut - b.claimedB;
+        return (shares * b.bOut) / b.shares;
     }
 
     // ─── Retained B: cliff + linear vesting, pull-based ─────────────────────────

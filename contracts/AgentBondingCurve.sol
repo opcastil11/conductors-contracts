@@ -186,13 +186,13 @@ contract AgentBondingCurve is ReentrancyGuard {
      * @dev Reverts unless called by the bound {AgentController} — this is the only non-trading
      *      path by which quote ever leaves the curve, and it always retires the matching claim.
      * @param wholeShares whole A shares crossing to Product B
-     * @param minQuoteOut floor on the released amount. Post-graduation the release is a
-     *        proportional LP withdrawal, so a same-block swap can skew the pool's composition and
-     *        shrink the quote leg; this bounds that grief (the attacker gains nothing but pays
-     *        the AMM fee twice, so it is nuisance rather than extraction).
+     * @param lpToRemove the share of this curve's LP the retired A is entitled to, computed by the
+     *        controller with the same valuation it priced the B with (so the two never disagree)
+     * @param minQuoteOut floor on the released amount, derived on-chain by the controller: the
+     *        release is a proportional LP withdrawal, so a same-block skew could shrink it
      * @return releasedQuote quote sent to the controller to fund the real-world asset
      */
-    function redeemForConversion(uint256 wholeShares, uint256 minQuoteOut)
+    function redeemForConversion(uint256 wholeShares, uint256 lpToRemove, uint256 minQuoteOut)
         external
         nonReentrant
         returns (uint256 releasedQuote)
@@ -207,16 +207,10 @@ contract AgentBondingCurve is ReentrancyGuard {
         // inventory that has to seed the AMM, and the supply the B ratio is fixed on is only
         // final once the unsold A is burned.
         require(graduated, "not graduated");
-        // The reserve is the AMM's quote leg. Withdraw the same share of this curve's LP as the
-        // A being retired is of the A outside that position, and burn the share leg that comes
-        // back — quote-per-outstanding-A is unchanged for everyone left. Only the curve's own
-        // slice of the pool's tracked reserve is excluded: A that third parties provide as LP is
-        // still theirs, and excluding it would inflate the release.
-        uint256 lp = amm.liquidityBalance(address(this));
-        uint256 curveShares = (amm.shareReserve() * lp) / amm.totalLiquidity();
-        uint256 outstanding = shareToken.totalSupply() - curveShares;
-        require(outstanding >= baseAmount, "bad circulating");
-        uint256 lpToRemove = (lp * baseAmount) / outstanding;
+        // The reserve is the AMM's quote leg. The controller withdraws the share of this curve's LP
+        // that the retired A is of the A outside the position, and the share leg that comes back is
+        // burned — quote-per-outstanding-A is unchanged for everyone left.
+        require(lpToRemove <= amm.liquidityBalance(address(this)), "lp");
         if (lpToRemove > 0) {
             (uint256 shareOut, uint256 quoteOut) =
                 amm.removeLiquidity(lpToRemove, 0, minQuoteOut, block.timestamp);
