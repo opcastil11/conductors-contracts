@@ -23,7 +23,7 @@ contract CurveFuzz is Test {
     {
         AgentShareToken a = new AgentShareToken("A", "A", supply * 1e18, address(this), 18);
         curve = new AgentBondingCurve(
-            address(a), address(usdc), base, slope, sellFee, buyFee, NO_GRAD, supply, fees
+            address(a), address(usdc), base, slope, sellFee, buyFee, NO_GRAD, supply, fees, address(this)
         );
         a.transfer(address(curve), supply * 1e18);
         usdc.mint(address(this), type(uint128).max);

@@ -7,6 +7,7 @@ import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/Pausable.sol";
 import "./AgentShareToken.sol";
 import "./AgentBondingCurve.sol";
+import "./AgentCurveFactory.sol";
 import "./AgentControllerFactory.sol";
 
 /**
@@ -43,6 +44,7 @@ contract AgentLaunchpad is Ownable, Pausable {
     IERC20 public quoteToken;
     address public platformTreasury;  // fee recipient + leftover-A treasury
     IKycRegistry public kycRegistry;  // gate applied at the A→B crossing; 0 ⇒ ungated (testnet)
+    AgentCurveFactory public immutable curveFactory; // created here; holds the curve's creation code (size split)
     AgentControllerFactory public controllerFactory; // holds AgentController's creation code (size split)
     address public pendingControllerFactory;         // proposed replacement, live after FACTORY_DELAY
     uint256 public pendingControllerFactoryAt;       // earliest time it can be accepted (0 = none)
@@ -111,6 +113,7 @@ contract AgentLaunchpad is Ownable, Pausable {
         quoteToken = IERC20(_quoteToken);
         platformTreasury = _platformTreasury;
         authorizedLauncher[_owner] = true;
+        curveFactory = new AgentCurveFactory();
     }
 
     // ─── Admin ────────────────────────────────────────────────────────────────
@@ -192,17 +195,17 @@ contract AgentLaunchpad is Ownable, Pausable {
 
         AgentShareToken share = new AgentShareToken(p.name, p.symbol, baseSupply, address(this), 18);
 
-        AgentBondingCurve bondingCurve = new AgentBondingCurve(
-            address(share),
-            address(quoteToken),
-            p.basePrice,
-            p.slope,
-            p.sellFeeBps,
-            p.buyFeeBps,
-            p.graduationRaise,
-            p.supply,           // curveSupply (whole shares)
-            feeTo
-        );
+        AgentBondingCurve bondingCurve = AgentBondingCurve(curveFactory.deploy(AgentCurveFactory.Args({
+            shareToken: address(share),
+            quoteToken: address(quoteToken),
+            basePrice: p.basePrice,
+            slope: p.slope,
+            sellFeeBps: p.sellFeeBps,
+            buyFeeBps: p.buyFeeBps,
+            graduationRaise: p.graduationRaise,
+            curveSupply: p.supply,  // whole shares
+            feeRecipient: feeTo
+        })));
 
         IERC20(address(share)).safeTransfer(address(bondingCurve), baseSupply);
 

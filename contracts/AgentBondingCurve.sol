@@ -59,7 +59,7 @@ contract AgentBondingCurve is ReentrancyGuard {
     uint256 public immutable graduationRaise;
     uint256 public immutable curveSupply;     // total WHOLE shares held at launch (donation-proof)
     address public immutable feeRecipient;
-    address public immutable launchpad;       // deployer; the only address that may bind a controller
+    address public immutable launchpad;       // the only address that may bind a controller
 
     uint256 public sold;    // WHOLE shares outstanding in the market (redeemable against the reserve)
     uint256 public burned;  // WHOLE shares permanently retired by A→B conversion
@@ -91,11 +91,12 @@ contract AgentBondingCurve is ReentrancyGuard {
         uint256 _buyFeeBps,
         uint256 _graduationRaise,
         uint256 _curveSupply,
-        address _feeRecipient
+        address _feeRecipient,
+        address _launchpad
     ) {
         require(_shareToken != address(0) && _quoteToken != address(0), "zero addr");
         require(_basePrice > 0 && _graduationRaise > 0 && _curveSupply > 0, "zero param");
-        require(_feeRecipient != address(0), "zero recipient");
+        require(_feeRecipient != address(0) && _launchpad != address(0), "zero recipient");
         require(_sellFeeBps <= 1000 && _buyFeeBps <= 1000, "fee too high");
         shareToken = IERC20(_shareToken);
         quoteToken = IERC20(_quoteToken);
@@ -106,7 +107,7 @@ contract AgentBondingCurve is ReentrancyGuard {
         graduationRaise = _graduationRaise;
         curveSupply = _curveSupply;
         feeRecipient = _feeRecipient;
-        launchpad = msg.sender;
+        launchpad = _launchpad;
     }
 
     // ─── Controller binding ────────────────────────────────────────────────────
