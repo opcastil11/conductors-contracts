@@ -67,7 +67,7 @@ describe("AgentLaunchpad — gating & registry", () => {
     const { launchpad } = await deployFixture();
     await expect(launchpad.launch({
       name: "X", symbol: "X", supply: SUPPLY, basePrice: BASE_PRICE, slope: SLOPE,
-      buyFeeBps: 0, sellFeeBps: 0, graduationRaise: 10n ** 30n, creator: ethers.ZeroAddress, feeRecipient: ethers.ZeroAddress, // > full integral
+      buyFeeBps: 0, sellFeeBps: 0, graduationRaise: 10n ** 30n, creator: (await ethers.getSigners())[0].address, feeRecipient: ethers.ZeroAddress, // > full integral
     })).to.be.revertedWith("grad unreachable");
   });
 });
